@@ -1,0 +1,32 @@
+# Kernel module build artifacts
+*.o
+*.ko
+*.ko.cmd
+*.mod
+*.mod.c
+*.mod.o
+*.order
+*.symvers
+*.unsigned
+.*.cmd
+.*.d
+.tmp_versions/
+modules.builtin
+modules.order
+Module.symvers
+modules.nsdeps
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.code-workspace
+.project
+.cproject
+.settings/
+tags
+TAGS
+cscope.*
+compile_commands.json
