@@ -2,6 +2,7 @@
 /*
 Sony cxd2878 family
 Copyright (c) 2021 Davin zhang <Davin@tbsdtv.com> www.Turbosight.com
+Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
 */
 #include <linux/delay.h>
 #include <linux/errno.h>
@@ -3205,10 +3206,10 @@ static int cxd2878_init(struct dvb_frontend *fe)
 	else
 		msleep(21);
 	
-	if(dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802){ //cxd6802
+	if(dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802 || dev->chipid == SONY_DEMOD_CHIP_ID_CXD2878){ //cxd6802/cxd2878
 		u8 data[] = {0x00, 0x00, 0x00, 0x00};
-		
-		cxd2878_wr(dev,dev->slvt,0x00,0x9C);      
+
+		cxd2878_wr(dev,dev->slvt,0x00,0x9C);
 		cxd2878_wrm(dev,dev->slvt,0x10,data,4);
 	}else{	//cxd6822
 	
@@ -3225,8 +3226,8 @@ static int cxd2878_init(struct dvb_frontend *fe)
 	//init internal tuner
 	cxd2878_i2c_repeater(dev,1);
 	
-	if(dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802)
-		ascot3_init(dev); //tuner=cxd2878a
+	if(dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802 || dev->chipid == SONY_DEMOD_CHIP_ID_CXD2878)
+		ascot3_init(dev); //tuner=ascot3
 	else if((dev->chipid == SONY_DEMOD_CHIP_ID_CXD6822)||(dev->chipid == SONY_DEMOD_CHIP_ID_CXD2878A))
 		freia_init(dev); // tuner =cxd6866
 		
@@ -3392,7 +3393,7 @@ static int cxd2878_read_status(struct dvb_frontend *fe,
 
 	/*rf signal*/	
 	ret |= cxd2878_i2c_repeater(dev,1);
-	if(dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802)
+	if(dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802 || dev->chipid == SONY_DEMOD_CHIP_ID_CXD2878)
 		ret |= ascot3_read_rssi(dev,c->frequency/1000,&rflevel); //unit khz
 	else if((dev->chipid == SONY_DEMOD_CHIP_ID_CXD6822)||(dev->chipid == SONY_DEMOD_CHIP_ID_CXD2878A))
 		ret |= freia_read_rssi(dev,c->frequency/1000,&rflevel);		
@@ -3744,7 +3745,7 @@ static int cxd2878_set_frontend(struct dvb_frontend *fe)
 
 		// set tuner
 	ret |= cxd2878_i2c_repeater(dev,1);
-	if(dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802)
+	if(dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802 || dev->chipid == SONY_DEMOD_CHIP_ID_CXD2878)
 		ret |= ascot3_tune(dev,c->frequency/1000); //unit khz
 	else if((dev->chipid == SONY_DEMOD_CHIP_ID_CXD6822)||(dev->chipid == SONY_DEMOD_CHIP_ID_CXD2878A))
 		ret |= freia_tune(dev,c->frequency/1000); //unit khz
@@ -3796,44 +3797,6 @@ static int cxd2878_tune(struct dvb_frontend*fe,bool re_tune,
 	return 0;
 }
 
-static int cxd2878_set_property(struct dvb_frontend*fe,
-		u32 cmd,u32 data)
-{
-	int ret = 0;
-	switch(cmd){
-		case DTV_DELIVERY_SYSTEM:
-			switch (data){
-				default:
-				case SYS_DVBT:
-				case SYS_DVBT2:
-					fe->ops.info.frequency_min_hz = 174*MHz;
-					fe->ops.info.frequency_max_hz = 868*MHz;
-					fe->ops.info.frequency_stepsize_hz = 250000;				
-					break;
-				case SYS_ISDBT:
-					fe->ops.info.frequency_min_hz = 42*MHz;
-					fe->ops.info.frequency_max_hz = 1002*MHz;
-					fe->ops.info.frequency_stepsize_hz = 0;
-					break;
-				case SYS_DVBC_ANNEX_A:
-				case SYS_DVBC_ANNEX_B:
-				case SYS_DVBC_ANNEX_C:
-					fe->ops.info.frequency_min_hz = 47*MHz;
-					fe->ops.info.frequency_max_hz = 1002*MHz;
-					fe->ops.info.frequency_stepsize_hz = 62500;
-					fe->ops.info.symbol_rate_min = 1700000;
-					fe->ops.info.symbol_rate_max = 7200000;
-					break;
-				case SYS_ATSC:
-					fe->ops.info.frequency_min_hz = 54*MHz;
-					fe->ops.info.frequency_max_hz = 858*MHz;
-					fe->ops.info.frequency_stepsize_hz = 62500;
-					break;
-			}
-		}
-
-	return ret;
-}
 static enum dvbfe_algo cxd2878_get_algo(struct dvb_frontend *fe)
 {
 	return DVBFE_ALGO_HW;
@@ -3883,46 +3846,6 @@ static int cxd2878_read_ucblocks(struct dvb_frontend *fe,u32 *ucblocks)
 	*ucblocks = 0;
 
 	return 0;
-}
-static void cxd2878_spi_read(struct dvb_frontend *fe, struct ecp3_info *ecp3inf)
-{
-
-	struct cxd2878_dev *dev = fe->demodulator_priv;
-
-
-	if (dev->base->config->read_properties)
-		dev->base->config->read_properties(dev->base->i2c,ecp3inf->reg, &(ecp3inf->data));
-
-	return ;
-}
-
-static void cxd2878_spi_write(struct dvb_frontend *fe,struct ecp3_info *ecp3inf)
-{
-
-	struct cxd2878_dev *dev = fe->demodulator_priv;
-
-
-	if (dev->base->config->write_properties)
-		dev->base->config->write_properties(dev->base->i2c,ecp3inf->reg, ecp3inf->data);
-	return ;
-}
-static void cxd2878_eeprom_read(struct dvb_frontend *fe, struct eeprom_info *eepinf)
-{
-	struct cxd2878_dev *dev = fe->demodulator_priv;
-
-	if (dev->base->config->read_eeprom)
-		dev->base->config->read_eeprom(dev->base->i2c,eepinf->reg, &(eepinf->data));
-	return ;
-}
-
-static void cxd2878_eeprom_write(struct dvb_frontend *fe,struct eeprom_info *eepinf)
-{
-	struct cxd2878_dev *dev = fe->demodulator_priv;
-
-	if (dev->base->config->write_eeprom)
-		dev->base->config->write_eeprom(dev->base->i2c,eepinf->reg, eepinf->data);
-
-	return ;
 }
 static void cxd2878_release (struct dvb_frontend*fe)
 {
@@ -3976,13 +3899,6 @@ static const struct dvb_frontend_ops cxd2878_ops = {
 			.read_ber  				= cxd2878_read_ber,
 			.read_snr				= cxd2878_read_snr,
 			.read_ucblocks			= cxd2878_read_ucblocks,
-
-			.set_property			= cxd2878_set_property,
-			
-			.spi_read				= cxd2878_spi_read,
-			.spi_write				= cxd2878_spi_write,
-			.eeprom_read		= cxd2878_eeprom_read,
-			.eeprom_write		= cxd2878_eeprom_write,
 };
 
 static struct cxd_base *match_base(struct i2c_adapter *i2c,u8 adr)

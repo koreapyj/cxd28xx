@@ -30,3 +30,7 @@ tags
 TAGS
 cscope.*
 compile_commands.json
+
+# Agents
+CLAUDE.md
+.claude

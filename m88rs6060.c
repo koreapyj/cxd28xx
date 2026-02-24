@@ -3,10 +3,9 @@
  * Montage Technology M88rs6060 demodulator and tuner drivers
  * some code form m88ds3103
  * Copyright (c) 2021 Davin zhang <Davin@tbsdtv.com> www.Turbosight.com
+ * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
  *
 */
-#include <media/dvb_math.h>
-
 #include "m88rs6060_priv.h"
 #include <linux/mutex.h>
 #define HWTUNE
@@ -3239,8 +3238,8 @@ static int m88rs6060_get_frontend(struct dvb_frontend *fe, struct dtv_frontend_p
 			case MtFeCodeRate_14_45:	p->fec_inner = FEC_14_45;	break;
 			case MtFeCodeRate_26_45:	p->fec_inner = FEC_26_45;	break;
 			case MtFeCodeRate_28_45:	p->fec_inner = FEC_28_45;	break;
-			case MtFeCodeRate_29_45:	p->fec_inner = FEC_29_45;	break;
-			case MtFeCodeRate_31_45:	p->fec_inner = FEC_31_45;	break;
+			case MtFeCodeRate_29_45:	p->fec_inner = FEC_AUTO;	break;
+			case MtFeCodeRate_31_45:	p->fec_inner = FEC_AUTO;	break;
 			case MtFeCodeRate_32_45:	p->fec_inner = FEC_32_45;	break;
 			case MtFeCodeRate_77_90:	p->fec_inner = FEC_77_90;	break;
 			default:			p->fec_inner = FEC_NONE;  	break;
@@ -3266,57 +3265,6 @@ static int m88rs6060_get_frontend(struct dvb_frontend *fe, struct dtv_frontend_p
 
  return 0;
 }
-static void m88rs6060_spi_read(struct dvb_frontend *fe,
-			       struct ecp3_info *ecp3inf)
-{
-	struct i2c_client *client = fe->demodulator_priv;
-	struct m88rs6060_dev *dev = i2c_get_clientdata(client);
-	struct i2c_adapter *i2c = dev->base->i2c;
-
-	if (dev->config.read_properties)
-		dev->config.read_properties(i2c, ecp3inf->reg,
-				     &(ecp3inf->data));
-
-	return;
-}
-
-static void m88rs6060_spi_write(struct dvb_frontend *fe,
-				struct ecp3_info *ecp3inf)
-{
-		struct i2c_client *client = fe->demodulator_priv;
-	struct m88rs6060_dev *dev = i2c_get_clientdata(client);
-	struct i2c_adapter *i2c = dev->base->i2c;
-
-	if (dev->config.write_properties)
-		dev->config.write_properties(i2c, ecp3inf->reg,
-				      ecp3inf->data);
-	return;
-}
-
-static void m88rs6060_eeprom_read(struct dvb_frontend *fe, struct eeprom_info *eepinf)
-{
-	struct i2c_client *client = fe->demodulator_priv;
-	struct m88rs6060_dev *dev = i2c_get_clientdata(client);
-	struct i2c_adapter *i2c = dev->base->i2c;
-
-	if (dev->config.read_eeprom)
-		dev->config.read_eeprom(i2c, eepinf->reg,
-				      &(eepinf->data));
-	return ;
-}
-
-static void m88rs6060_eeprom_write(struct dvb_frontend *fe,struct eeprom_info *eepinf)
-{
-	struct i2c_client *client = fe->demodulator_priv;
-	struct m88rs6060_dev *dev = i2c_get_clientdata(client);
-	struct i2c_adapter *i2c = dev->base->i2c;
-
-	if (dev->config.write_eeprom)
-		dev->config.write_eeprom(i2c, eepinf->reg,
-				      eepinf->data);
-	return ;
-}
-
 static const struct dvb_frontend_ops m88rs6060_ops = {
 	.delsys = {SYS_DVBS, SYS_DVBS2},
 	.info = {
@@ -3349,11 +3297,6 @@ static const struct dvb_frontend_ops m88rs6060_ops = {
 	.set_tone = m88rs6060_set_tone,
 	.diseqc_send_burst = m88rs6060_diseqc_send_burst,
 	.diseqc_send_master_cmd = m88rs6060_diseqc_send_master_cmd,
-	.spi_read = m88rs6060_spi_read,
-	.spi_write = m88rs6060_spi_write,
-	.eeprom_read = m88rs6060_eeprom_read,
-	.eeprom_write = m88rs6060_eeprom_write,
-
 };
 static int m88rs6060_ready(struct m88rs6060_dev *dev)
 {
