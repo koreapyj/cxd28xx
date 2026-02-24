@@ -7,12 +7,14 @@
  * under the terms of the GNU General Public License as published by the
  * Free Software Foundation, version 2.
  *
+ * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
  */
 
 #include <linux/version.h>
 #include "tbs5530.h"
 #include "cxd2878.h"
 #include "m88rs6060.h"
+#include "atsc3_alp.h"
 
 #define tbs5530_READ_MSG 0
 #define tbs5530_WRITE_MSG 1
@@ -21,6 +23,10 @@
 struct tbs5530_state {
 	struct i2c_client *i2c_client;
 	u8 initialized;
+
+	/* ATSC 3.0 ALP network interface */
+	struct dvb_usb_device *d;
+	struct atsc3_alp alp;
 };
 
 
@@ -197,7 +203,7 @@ static int tbs5530_frontend_cxd2878_attach(struct dvb_usb_adapter *adap)
 		return -ENODEV;
 
 	strscpy(adap->fe_adap[0].fe->ops.info.name,d->props.devices[0].name,60);
-	strcat(adap->fe_adap[0].fe->ops.info.name," DVB-T/T2/C/C2,ISDB-T/C,ATSC,J83B");
+	strcat(adap->fe_adap[0].fe->ops.info.name," DVB-T/T2/C/C2,ISDB-T/C,ATSC/3.0,J83B");
 	return 0;		
 }
 static int tbs5530_frontend_m88rs6060_attach(struct dvb_usb_adapter *adap)
@@ -376,30 +382,68 @@ static struct dvb_usb_device_properties tbs5530_properties = {
 	}
 };
 
+/*
+ * Custom stream complete callback for ATSC 3.0 ALP support.
+ * Replicates default dvb_usb_data_complete() (calls dvb_dmx_swfilter),
+ * and additionally feeds data to the ALP parser when the net device is up.
+ */
+static void tbs5530_data_complete(struct usb_data_stream *stream,
+				  u8 *buf, size_t len)
+{
+	struct dvb_usb_adapter *adap = stream->user_priv;
+	struct tbs5530_state *st;
+
+	if (!adap)
+		return;
+
+	/* Default behavior: feed demux */
+	if (adap->feedcount > 0 && adap->state & DVB_USB_ADAP_STATE_DVB)
+		dvb_dmx_swfilter(&adap->demux, buf, len);
+
+	/* ALP processing for ATSC 3.0 */
+	st = adap->dev->priv;
+	atsc3_alp_feed(&st->alp, buf, len);
+}
+
 static int tbs5530_probe(struct usb_interface *intf,
 		const struct usb_device_id *id)
 {
-	if (0 == dvb_usb_device_init(intf, &tbs5530_properties,
-			THIS_MODULE, NULL, adapter_nr)) {
-		return 0;
-	}
-	return -ENODEV;
+	struct dvb_usb_device *d = NULL;
+	struct tbs5530_state *st;
+
+	if (dvb_usb_device_init(intf, &tbs5530_properties,
+			THIS_MODULE, &d, adapter_nr))
+		return -ENODEV;
+
+	st = d->priv;
+	st->d = d;
+
+	/* Override stream complete callback for ALP processing */
+	d->adapter[0].fe_adap[0].stream.complete = tbs5530_data_complete;
+
+	/* ATSC 3.0 ALP network interface (non-fatal if creation fails) */
+	st->alp.fe = d->adapter[0].fe_adap[0].fe;
+	atsc3_alp_register_netdev(&st->alp);
+
+	return 0;
 }
 
 static void tbs5530_disconnect(struct usb_interface *intf)
 {
-#if 1
 	struct dvb_usb_device *d = usb_get_intfdata(intf);
 	struct tbs5530_state *st = d->priv;
 	struct i2c_client *client;
 
-	/* remove I2C client for tuner/demod*/
+	/* Tear down ATSC 3.0 network interface */
+	atsc3_alp_unregister_netdev(&st->alp);
+
+	/* Remove I2C client for tuner/demod */
 	client = st->i2c_client;
 	if (client) {
 		module_put(client->dev.driver->owner);
 		i2c_unregister_device(client);
 	}
-#endif
+
 	dvb_usb_device_exit(intf);
 }
 

@@ -1,6 +1,6 @@
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
-obj-m += cxd2878.o m88rs6060.o tbs5530.o it930x.o
+obj-m += cxd2878.o m88rs6060.o atsc3_alp.o tbs5530.o it930x.o
 
 ccflags-y += -I$(src) -DCONFIG_DVB_CXD2878=1
 

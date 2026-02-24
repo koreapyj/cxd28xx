@@ -230,6 +230,9 @@ enum sony_dtv_system_t{
     u32 configISDBT_8;             /**< ISDB-T 8MHz */
     u32 configJ83B_5_06_5_36;      /**< J.83B 5.06/5.36Msps auto selection */
     u32 configJ83B_5_60;           /**< J.83B. 5.6Msps */
+    u32 configATSC3_6;             /**< ATSC 3.0 6MHz */
+    u32 configATSC3_7;             /**< ATSC 3.0 7MHz */
+    u32 configATSC3_8;             /**< ATSC 3.0 8MHz */
 } ;
 
 

@@ -27,6 +27,7 @@
 #include <media/dvb_net.h>
 
 #include "cxd2878.h"
+#include "atsc3_alp.h"
 
 /* -------- IT930x bridge constants -------- */
 
@@ -67,14 +68,6 @@
 
 /* Firmware */
 #define IT9306_FIRMWARE_FILE	"dvb-usb-it9306-01.fw"
-
-#if 0 /* ATSC 3.0 — not yet implemented */
-/* ALP (ATSC Link-layer Protocol) */
-#define ALP_HDR_LEN			2	/* single-header mode */
-#define ALP_MAX_PAYLOAD			2047	/* 11-bit length field */
-#define ALP_BUF_SIZE			65536
-#define ALP_TYPE_IPV4			0
-#endif
 
 /* Bridge registers */
 #define IT930X_REG_CLK_DISABLE		0x4976
@@ -195,29 +188,11 @@ struct it930x_dev {
 	unsigned long urb_complete_empty;
 	u64 urb_bytes_total;
 
-#if 0 /* ATSC 3.0 — not yet implemented */
 	/* ATSC 3.0 network interface */
-	struct net_device *net;
-	u8 *alp_buf;
-	unsigned int alp_pos;
-#endif
+	struct atsc3_alp alp;
 };
 
 static short adapter_nr[] = { [0 ... 3] = -1 };
-
-#if 0 /* ATSC 3.0 — not yet implemented */
-/* Check if the frontend is currently tuned to ATSC 3.0
- * (SYS_ATSC with non-8VSB modulation trick) */
-static bool it930x_is_atsc3(struct it930x_dev *dev)
-{
-	struct dtv_frontend_properties *c;
-
-	if (!dev->fe)
-		return false;
-	c = &dev->fe->dtv_property_cache;
-	return (c->delivery_system == SYS_ATSC && c->modulation != VSB_8);
-}
-#endif
 
 /* -------- Checksum -------- */
 
@@ -1468,252 +1443,16 @@ static int it930x_validate_endpoints(struct usb_interface *intf)
 static int it930x_start_streaming(struct it930x_dev *dev);
 static void it930x_stop_streaming(struct it930x_dev *dev);
 
-#if 0 /* ATSC 3.0 — not yet implemented */
-/* -------- ALP parser for ATSC 3.0 -------- */
-
-/*
- * Parse complete ALP packets from the reassembly buffer.
- * Called after new data has been appended to dev->alp_buf.
- *
- * ALP header (ATSC A/330, Packet_Type != 7):
- *   Byte 0: [Packet_Type:3][Header_Mode:1][Length_hi:4]
- *   Byte 1: [Length_lo:8]
- *   Length = bits [2:0] of byte 0 ++ byte 1 = 11 bits (max 2047)
- *   Bit 3 of byte 0 is reserved (part of Header_Mode=1 additional header).
- */
-static void it930x_alp_parse(struct it930x_dev *dev)
+/* ALP streaming callbacks for atsc3_alp module */
+static int it930x_alp_start(void *priv)
 {
-	struct net_device *net = dev->net;
-	unsigned int pos = 0;
-
-	while (pos + ALP_HDR_LEN <= dev->alp_pos) {
-		u8 pkt_type = (dev->alp_buf[pos] >> 5) & 0x07;
-		u8 hdr_mode = (dev->alp_buf[pos] >> 4) & 0x01;
-		u16 pkt_len;
-		unsigned int hdr_len;
-		unsigned int total;
-		struct sk_buff *skb;
-
-		/* 11-bit payload length */
-		pkt_len = ((u16)(dev->alp_buf[pos] & 0x07) << 8) |
-			  dev->alp_buf[pos + 1];
-
-		if (pkt_len == 0 || pkt_len > ALP_MAX_PAYLOAD) {
-			pos++;
-			net->stats.rx_errors++;
-			continue;
-		}
-
-		if (hdr_mode != 0) {
-			/* Extended header — skip this ALP packet.
-			 * Parse SIF/HEF byte to determine additional header
-			 * size so we advance correctly. */
-			unsigned int ahdr = 1; /* SIF+HEF flags byte */
-
-			if (pos + 3 > dev->alp_pos)
-				break;
-			if (dev->alp_buf[pos + 2] & 0x80)
-				ahdr++; /* SIF: sub_stream_id */
-			if (dev->alp_buf[pos + 2] & 0x40) {
-				/* HEF: extension_type + extension_length + data */
-				unsigned int hef_off = pos + 2 + ahdr;
-
-				if (hef_off + 2 > dev->alp_pos)
-					break;
-				ahdr += 2 + dev->alp_buf[hef_off + 1];
-			}
-
-			total = 2 + ahdr + pkt_len;
-			if (pos + total > dev->alp_pos)
-				break;
-			pos += total;
-			continue;
-		}
-
-		/* Single-header mode: 2-byte header + payload */
-		hdr_len = ALP_HDR_LEN;
-		total = hdr_len + pkt_len;
-		if (pos + total > dev->alp_pos)
-			break; /* incomplete packet — wait for more data */
-
-		if (pkt_type == ALP_TYPE_IPV4 && pkt_len >= 20) {
-			const u8 *ip = &dev->alp_buf[pos + hdr_len];
-
-			/* Validate IPv4 version nibble */
-			if ((ip[0] >> 4) != 4)
-				goto skip;
-
-			skb = dev_alloc_skb(pkt_len);
-			if (skb) {
-				skb_put_data(skb, ip, pkt_len);
-				skb->dev = net;
-				skb->protocol = htons(ETH_P_IP);
-				skb->pkt_type = PACKET_HOST;
-				skb_reset_mac_header(skb);
-				skb_reset_network_header(skb);
-
-				net->stats.rx_packets++;
-				net->stats.rx_bytes += pkt_len;
-				netif_rx(skb);
-			} else {
-				net->stats.rx_dropped++;
-			}
-		}
-skip:
-		pos += total;
-	}
-
-	/* Compact remaining data to front of buffer */
-	if (pos > 0) {
-		dev->alp_pos -= pos;
-		if (dev->alp_pos)
-			memmove(dev->alp_buf, dev->alp_buf + pos, dev->alp_pos);
-	}
+	return it930x_start_streaming(priv);
 }
 
-/*
- * Extract ALP payloads from TS-encapsulated ALP (ALP_DIV_TS mode).
- *
- * CXD6801 ALP_DIV_TS uses a 3-byte TS header (no TSC/AFC/CC byte):
- *   Byte 0:   0x47 sync
- *   Byte 1-2: TEI(1) + PUSI(1) + Priority(1) + PID(13)
- *
- * When PUSI=0: bytes 3-187 are 185 bytes of ALP continuation data.
- * When PUSI=1: byte 3 is a pointer_field (P), bytes 4..4+P-1 are the
- *   tail of the previous ALP packet, bytes 4+P..187 start a new ALP packet.
- */
-static void it930x_ts_to_alp(struct it930x_dev *dev, const u8 *data, int len)
+static void it930x_alp_stop(void *priv)
 {
-	struct net_device *net = dev->net;
-	int pos;
-
-	if (!net || !netif_running(net))
-		return;
-
-	for (pos = 0; pos + 188 <= len; pos += 188) {
-		const u8 *pkt = data + pos;
-
-		if (pkt[0] != 0x47)
-			continue;
-
-		/* Skip packets with transport error */
-		if (pkt[1] & 0x80)
-			continue;
-
-		if (pkt[1] & 0x40) {
-			/* PUSI=1: pointer_field at byte 3 */
-			u8 ptr = pkt[3];
-
-			if (ptr > 184) {
-				net->stats.rx_errors++;
-				continue;
-			}
-
-			/* Feed tail of previous ALP packet (ptr bytes) */
-			if (ptr > 0 && dev->alp_pos > 0) {
-				if (dev->alp_pos + ptr <= ALP_BUF_SIZE) {
-					memcpy(dev->alp_buf + dev->alp_pos,
-					       pkt + 4, ptr);
-					dev->alp_pos += ptr;
-				}
-			}
-
-			/* Parse to deliver any completed ALP packet */
-			it930x_alp_parse(dev);
-
-			/* Discard leftover (incomplete/initial sync garbage) */
-			dev->alp_pos = 0;
-
-			/* New ALP data starts at pkt[4 + ptr] */
-			if (ptr < 184) {
-				unsigned int new_len = 184 - ptr;
-
-				memcpy(dev->alp_buf, pkt + 4 + ptr, new_len);
-				dev->alp_pos = new_len;
-			}
-		} else {
-			/* PUSI=0: 185 bytes of continuation data */
-			if (dev->alp_pos + 185 > ALP_BUF_SIZE) {
-				net->stats.rx_errors++;
-				dev->alp_pos = 0;
-				continue;
-			}
-
-			memcpy(dev->alp_buf + dev->alp_pos, pkt + 3, 185);
-			dev->alp_pos += 185;
-		}
-	}
-
-	it930x_alp_parse(dev);
+	it930x_stop_streaming(priv);
 }
-
-/* -------- ATSC 3.0 network device -------- */
-
-static int it930x_net_open(struct net_device *net)
-{
-	struct it930x_dev *dev = net->ml_priv;
-	struct dtv_frontend_properties *c;
-	int ret;
-
-	/* Only allow open when frontend is tuned for ATSC 3.0
-	 * (SYS_ATSC + non-8VSB modulation trick) */
-	if (!dev->fe)
-		return -ENODEV;
-	c = &dev->fe->dtv_property_cache;
-	if (c->delivery_system != SYS_ATSC || c->modulation == VSB_8)
-		return -ENOLINK;
-
-	dev->alp_pos = 0;
-
-	ret = it930x_start_streaming(dev);
-	if (ret)
-		return ret;
-
-	netif_carrier_on(net);
-	netif_start_queue(net);
-	return 0;
-}
-
-static int it930x_net_stop(struct net_device *net)
-{
-	struct it930x_dev *dev = net->ml_priv;
-
-	netif_stop_queue(net);
-	netif_carrier_off(net);
-	it930x_stop_streaming(dev);
-	dev->alp_pos = 0;
-
-	return 0;
-}
-
-static netdev_tx_t it930x_net_xmit(struct sk_buff *skb, struct net_device *net)
-{
-	/* Receive-only device */
-	dev_kfree_skb_any(skb);
-	net->stats.tx_dropped++;
-	return NETDEV_TX_OK;
-}
-
-static const struct net_device_ops it930x_netdev_ops = {
-	.ndo_open	= it930x_net_open,
-	.ndo_stop	= it930x_net_stop,
-	.ndo_start_xmit	= it930x_net_xmit,
-};
-
-static void it930x_net_setup(struct net_device *net)
-{
-	/* Raw IP point-to-point device — no Ethernet framing */
-	net->netdev_ops = &it930x_netdev_ops;
-	net->type = ARPHRD_NONE;
-	net->hard_header_len = 0;
-	net->addr_len = 0;
-	net->flags = IFF_POINTOPOINT | IFF_NOARP;
-	net->mtu = 1500;
-	net->min_mtu = 68;
-	net->max_mtu = 65535;
-	net->tx_queue_len = 0;
-}
-#endif /* ATSC 3.0 */
 
 /* -------- TS streaming -------- */
 
@@ -1730,6 +1469,9 @@ static void it930x_urb_complete(struct urb *urb)
 			dvb_dmx_swfilter(&dev->demux,
 					 urb->transfer_buffer,
 					 urb->actual_length);
+			atsc3_alp_feed(&dev->alp,
+				       urb->transfer_buffer,
+				       urb->actual_length);
 			dev->urb_complete_ok++;
 			dev->urb_bytes_total += urb->actual_length;
 		} else {
@@ -2232,6 +1974,13 @@ static int it930x_probe(struct usb_interface *intf,
 	if (ret)
 		goto err_i2c;
 
+	/* ATSC 3.0 ALP network interface (non-fatal if creation fails) */
+	dev->alp.fe = dev->fe;
+	dev->alp.start_streaming = it930x_alp_start;
+	dev->alp.stop_streaming = it930x_alp_stop;
+	dev->alp.priv = dev;
+	atsc3_alp_register_netdev(&dev->alp);
+
 	usb_set_intfdata(intf, dev);
 
 	dev_info(&intf->dev, "Generic ITE IT930X adapter attached\n");
@@ -2254,6 +2003,8 @@ static void it930x_disconnect(struct usb_interface *intf)
 
 	if (!dev)
 		return;
+
+	atsc3_alp_unregister_netdev(&dev->alp);
 
 	it930x_dvb_exit(dev);
 	i2c_del_adapter(&dev->i2c);
