@@ -1,0 +1,195 @@
+name: Build
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+']
+
+env:
+  DKMS_NAME: cxd28xx
+  DKMS_VERSION: "1.0"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04
+            container: ubuntu:22.04
+            install: >-
+              apt-get update &&
+              DEBIAN_FRONTEND=noninteractive apt-get install -y
+              build-essential linux-headers-generic
+            kdir_glob: /usr/src/linux-headers-*-generic
+
+          - name: Ubuntu 24.04
+            container: ubuntu:24.04
+            install: >-
+              apt-get update &&
+              DEBIAN_FRONTEND=noninteractive apt-get install -y
+              build-essential linux-headers-generic
+            kdir_glob: /usr/src/linux-headers-*-generic
+
+          - name: Debian 12
+            container: debian:12
+            install: >-
+              apt-get update &&
+              DEBIAN_FRONTEND=noninteractive apt-get install -y
+              build-essential linux-headers-amd64
+            kdir_glob: /usr/src/linux-headers-*-amd64
+
+          - name: Fedora 40
+            container: fedora:40
+            install: dnf install -y gcc make kernel-devel
+            kdir_glob: /usr/src/kernels/*
+
+          - name: Fedora 41
+            container: fedora:41
+            install: dnf install -y gcc make kernel-devel
+            kdir_glob: /usr/src/kernels/*
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: ${{ matrix.install }}
+
+      - name: Build modules
+        run: |
+          KDIR=$(ls -d ${{ matrix.kdir_glob }} | sort -V | tail -1)
+          echo "Building against $KDIR"
+          make KDIR="$KDIR"
+
+      - name: Verify modules
+        run: |
+          for m in cxd2878 m88rs6060 atsc3_alp tbs5530 it930x; do
+            test -f ${m}.ko && echo "OK: ${m}.ko" || { echo "MISSING: ${m}.ko"; exit 1; }
+          done
+
+  package-deb:
+    name: Package (deb)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build deb
+        run: |
+          PKG="${DKMS_NAME}-dkms_${DKMS_VERSION}_all"
+          mkdir -p "${PKG}/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
+          cp Makefile dkms.conf *.c *.h LICENSE "${PKG}/usr/src/${DKMS_NAME}-${DKMS_VERSION}/"
+
+          mkdir -p "${PKG}/DEBIAN"
+          cat > "${PKG}/DEBIAN/control" << EOF
+          Package: ${DKMS_NAME}-dkms
+          Version: ${DKMS_VERSION}
+          Architecture: all
+          Depends: dkms (>= 1.95)
+          Maintainer: Yoonji Park <koreapyj@dcmys.kr>
+          Description: CXD2878 DVB driver (DKMS)
+           Out-of-tree Linux kernel driver for the Sony CXD2878 demodulator.
+          EOF
+          sed -i 's/^          //' "${PKG}/DEBIAN/control"
+
+          cat > "${PKG}/DEBIAN/postinst" << 'EOF'
+          #!/bin/sh
+          set -e
+          dkms add -m cxd28xx -v 1.0 2>/dev/null || true
+          dkms build -m cxd28xx -v 1.0 || true
+          dkms install -m cxd28xx -v 1.0 || true
+          EOF
+          sed -i 's/^          //' "${PKG}/DEBIAN/postinst"
+          chmod 755 "${PKG}/DEBIAN/postinst"
+
+          cat > "${PKG}/DEBIAN/prerm" << 'EOF'
+          #!/bin/sh
+          set -e
+          dkms remove -m cxd28xx -v 1.0 --all 2>/dev/null || true
+          EOF
+          sed -i 's/^          //' "${PKG}/DEBIAN/prerm"
+          chmod 755 "${PKG}/DEBIAN/prerm"
+
+          dpkg-deb --build "${PKG}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: "*.deb"
+
+  package-rpm:
+    name: Package (rpm)
+    runs-on: ubuntu-latest
+    container: fedora:41
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rpm-build
+        run: dnf install -y rpm-build
+
+      - name: Build rpm
+        run: |
+          mkdir -p rpmbuild/{SPECS,SOURCES}
+          tar czf "rpmbuild/SOURCES/${DKMS_NAME}-${DKMS_VERSION}.tar.gz" \
+            --transform "s,^,${DKMS_NAME}-${DKMS_VERSION}/," \
+            Makefile dkms.conf *.c *.h LICENSE
+
+          cat > rpmbuild/SPECS/${DKMS_NAME}.spec << 'EOF'
+          Name:    cxd28xx-dkms
+          Version: 1.0
+          Release: 1
+          Summary: CXD2878 DVB driver (DKMS)
+          License: GPL-2.0-or-later
+          Source0: cxd28xx-1.0.tar.gz
+          BuildArch: noarch
+          Requires: dkms
+
+          %description
+          Out-of-tree Linux kernel driver for the Sony CXD2878 demodulator.
+
+          %prep
+          %setup -q -n cxd28xx-1.0
+
+          %install
+          mkdir -p %{buildroot}/usr/src/cxd28xx-1.0
+          cp -a * %{buildroot}/usr/src/cxd28xx-1.0/
+
+          %post
+          dkms add -m cxd28xx -v 1.0 2>/dev/null || true
+          dkms build -m cxd28xx -v 1.0 || true
+          dkms install -m cxd28xx -v 1.0 || true
+
+          %preun
+          dkms remove -m cxd28xx -v 1.0 --all 2>/dev/null || true
+
+          %files
+          /usr/src/cxd28xx-1.0
+          EOF
+          sed -i 's/^          //' rpmbuild/SPECS/${DKMS_NAME}.spec
+
+          rpmbuild -bb --define "_topdir $(pwd)/rpmbuild" rpmbuild/SPECS/${DKMS_NAME}.spec
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: rpmbuild/RPMS/**/*.rpm
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [package-deb, package-rpm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            deb-package/*.deb
+            rpm-package/**/*.rpm

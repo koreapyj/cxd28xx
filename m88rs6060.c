@@ -7,6 +7,7 @@
  *
 */
 #include "m88rs6060_priv.h"
+#include "compat.h"
 #include <linux/mutex.h>
 #define HWTUNE
 
@@ -3556,23 +3557,23 @@ static int m88rs6060_probe(struct i2c_client *client)
 	return ret;
 }
 
-static void m88rs6060_remove(struct i2c_client *client)
+static CXD28XX_I2C_REMOVE_RETURN m88rs6060_remove(struct i2c_client *client)
 {
 	struct m88rs6060_dev *dev = i2c_get_clientdata(client);
-	
+
 	dev_dbg(&client->dev, "\n");
 
 	dev->base->count --;
 	if(dev->base->count==0)
-	{	
+	{
 		list_del(&dev->base->m88rs6060list);
-		kfree(dev->base);	 
+		kfree(dev->base);
 	}
 	if(dev->priv){
 		dev->priv->base1->count --;
 		if(dev->priv->base1->count==0){
 			list_del(&dev->priv->base1->si5351list);
-			kfree(dev->priv);	 
+			kfree(dev->priv);
 		}
 	}
 	regmap_exit(dev->regmap);
@@ -3580,6 +3581,7 @@ static void m88rs6060_remove(struct i2c_client *client)
 	dev->fe.demodulator_priv = NULL;
 
 	kfree(dev);
+	CXD28XX_I2C_REMOVE_EPILOGUE
 }
 
 static const struct i2c_device_id m88rs6060_id_table[] = {
@@ -3593,7 +3595,7 @@ static struct i2c_driver m88rs6060_driver = {
 	.driver = {
 		   .name = "m88rs6060",
 		   },
-	.probe = m88rs6060_probe,
+	CXD28XX_I2C_PROBE = m88rs6060_probe,
 	.remove = m88rs6060_remove,
 	.id_table = m88rs6060_id_table,
 };

@@ -17,10 +17,7 @@ Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
 
 #include "cxd2878.h"
 #include "cxd2878_priv.h"
-
-#ifndef SYS_ATSC3
-#define SYS_ATSC3 35
-#endif
+#include "compat.h"
 
 static LIST_HEAD(cxdlist);
 
