@@ -1,12 +1,6 @@
 /*
  * ITE IT930x USB bridge driver for CXD2878 demod + tuner
  *
- * Self-contained bridge driver with threaded async USB transport,
- * full bridge initialization, firmware loading, and DVB integration.
- * Uses dvb_module_probe() for zero link-time dependency on demod/tuner.
- *
- * Based on reference IT930x driver architecture.
- *
  * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
  */
 
@@ -20,7 +14,6 @@
 #include <linux/completion.h>
 #include <linux/firmware.h>
 #include <linux/delay.h>
-#include <linux/wait.h>
 #include <media/dvb_frontend.h>
 #include <media/dmxdev.h>
 #include <media/dvb_demux.h>
@@ -58,9 +51,6 @@
 #define IT930X_I2C_SHORT_MAX	40
 #define IT930X_I2C_STAGE_CHUNK	40
 #define IT930X_I2C_BUS_IDX		3	/* IT930x bus for CXD2878 */
-
-/* Ring buffer */
-#define IT930X_RX_RING_SLOTS	32
 
 /* TS streaming */
 #define IT930X_URB_COUNT		4
@@ -112,15 +102,10 @@
 /* -------- Data structures -------- */
 
 struct it930x_cmd_req {
-	struct list_head node;
 	struct completion done;
 	struct kref refcount;
 	spinlock_t state_lock;
-	bool queued;
-	bool pending;
-	bool cancelled;
 	bool completed;
-	bool no_rx;
 	u8 seq;
 	u8 tx_payload_len;
 	u8 rx_payload_len;
@@ -131,31 +116,16 @@ struct it930x_cmd_req {
 	int status;
 };
 
-struct it930x_rx_slot {
-	u16 len;
-	u8 data[IT930X_CMD_MAX_PKT];
-};
-
 struct it930x_dev {
 	struct usb_device *udev;
 	struct usb_interface *intf;
 
 	/* Transport layer */
 	struct mutex io_lock;
-	spinlock_t tx_lock;
-	struct list_head tx_queue;
-	wait_queue_head_t tx_wq;
+	struct mutex tx_mutex;
 	spinlock_t pending_lock;
 	struct it930x_cmd_req *pending[U8_MAX + 1];
-	spinlock_t rx_lock;
-	struct it930x_rx_slot rx_ring[IT930X_RX_RING_SLOTS];
-	u16 rx_head;
-	u16 rx_tail;
-	u16 rx_count;
-	wait_queue_head_t rx_wq;
-	struct task_struct *tx_thread;
-	struct task_struct *rx_io_thread;
-	struct task_struct *rx_parse_thread;
+	struct task_struct *rx_thread;
 	u8 *tx_bulk_buf;
 	u8 *rx_bulk_buf;
 	bool stopping;
@@ -234,7 +204,7 @@ static void it930x_cmd_req_complete(struct it930x_cmd_req *req, int status,
 	unsigned long flags;
 
 	spin_lock_irqsave(&req->state_lock, flags);
-	if (req->cancelled || req->completed) {
+	if (req->completed) {
 		spin_unlock_irqrestore(&req->state_lock, flags);
 		return;
 	}
@@ -264,48 +234,7 @@ static int it930x_bulk_xfer(struct it930x_dev *dev, u8 ep, void *buf,
 	return usb_bulk_msg(dev->udev, pipe, buf, len, actual, timeout_ms);
 }
 
-/* -------- RX ring buffer -------- */
-
-static void it930x_rx_ring_push(struct it930x_dev *dev, const u8 *data,
-				u16 len)
-{
-	unsigned long flags;
-	struct it930x_rx_slot *slot;
-
-	spin_lock_irqsave(&dev->rx_lock, flags);
-	if (dev->rx_count == IT930X_RX_RING_SLOTS) {
-		spin_unlock_irqrestore(&dev->rx_lock, flags);
-		return;
-	}
-
-	slot = &dev->rx_ring[dev->rx_head];
-	slot->len = len;
-	memcpy(slot->data, data, len);
-	dev->rx_head = (dev->rx_head + 1) % IT930X_RX_RING_SLOTS;
-	dev->rx_count++;
-	spin_unlock_irqrestore(&dev->rx_lock, flags);
-	wake_up(&dev->rx_wq);
-}
-
-static bool it930x_rx_ring_pop(struct it930x_dev *dev,
-			       struct it930x_rx_slot *out)
-{
-	unsigned long flags;
-	bool have = false;
-
-	spin_lock_irqsave(&dev->rx_lock, flags);
-	if (dev->rx_count) {
-		*out = dev->rx_ring[dev->rx_tail];
-		dev->rx_tail = (dev->rx_tail + 1) % IT930X_RX_RING_SLOTS;
-		dev->rx_count--;
-		have = true;
-	}
-	spin_unlock_irqrestore(&dev->rx_lock, flags);
-
-	return have;
-}
-
-/* -------- Transport threads -------- */
+/* -------- Transport -------- */
 
 static int it930x_encode_tx_frame(struct it930x_cmd_req *req, u8 *frame,
 				  int *frame_len)
@@ -332,112 +261,17 @@ static int it930x_encode_tx_frame(struct it930x_cmd_req *req, u8 *frame,
 	return 0;
 }
 
-static int it930x_transport_tx_thread(void *data)
-{
-	struct it930x_dev *dev = data;
-
-	while (!kthread_should_stop()) {
-		struct it930x_cmd_req *req = NULL;
-		unsigned long flags;
-		bool cancelled;
-		int actual = 0;
-		int tx_len;
-		int ret;
-
-		if (!dev->tx_bulk_buf) {
-			msleep(20);
-			continue;
-		}
-
-		wait_event_interruptible(dev->tx_wq,
-					 dev->stopping ||
-					 !list_empty(&dev->tx_queue) ||
-					 kthread_should_stop());
-		if (dev->stopping || kthread_should_stop())
-			break;
-
-		spin_lock_irqsave(&dev->tx_lock, flags);
-		if (!list_empty(&dev->tx_queue)) {
-			req = list_first_entry(&dev->tx_queue,
-					       struct it930x_cmd_req, node);
-			list_del_init(&req->node);
-			req->queued = false;
-		}
-		spin_unlock_irqrestore(&dev->tx_lock, flags);
-		if (!req)
-			continue;
-
-		spin_lock_irqsave(&req->state_lock, flags);
-		cancelled = req->cancelled;
-		spin_unlock_irqrestore(&req->state_lock, flags);
-		if (cancelled)
-			goto out_put;
-
-		/* Assign sequence and register in pending table */
-		spin_lock_irqsave(&dev->pending_lock, flags);
-		req->seq = dev->seq++;
-		if (!req->no_rx) {
-			if (dev->pending[req->seq]) {
-				spin_unlock_irqrestore(&dev->pending_lock,
-						       flags);
-				it930x_cmd_req_complete(req, -EBUSY, 0,
-							NULL, 0);
-				goto out_put;
-			}
-			it930x_cmd_req_get(req);
-			req->pending = true;
-			dev->pending[req->seq] = req;
-		}
-		spin_unlock_irqrestore(&dev->pending_lock, flags);
-
-		ret = it930x_encode_tx_frame(req, dev->tx_bulk_buf, &tx_len);
-		if (ret) {
-			it930x_cmd_req_complete(req, ret, 0, NULL, 0);
-			goto out_clear_pending;
-		}
-
-		ret = it930x_bulk_xfer(dev, IT930X_EP_CMD_OUT, dev->tx_bulk_buf,
-				       tx_len, &actual, false,
-				       IT930X_USB_TIMEOUT_MS);
-		if (ret) {
-			it930x_cmd_req_complete(req, ret, 0, NULL, 0);
-			goto out_clear_pending;
-		}
-
-		if (req->no_rx)
-			it930x_cmd_req_complete(req, 0, 0, NULL, 0);
-
-		goto out_put;
-
-out_clear_pending:
-		if (!req->no_rx) {
-			spin_lock_irqsave(&dev->pending_lock, flags);
-			if (req->pending && dev->pending[req->seq] == req) {
-				dev->pending[req->seq] = NULL;
-				req->pending = false;
-				it930x_cmd_req_put(req);
-			}
-			spin_unlock_irqrestore(&dev->pending_lock, flags);
-		}
-
-out_put:
-		it930x_cmd_req_put(req);
-	}
-
-	return 0;
-}
-
-static int it930x_transport_rx_io_thread(void *data)
+static int it930x_rx_thread(void *data)
 {
 	struct it930x_dev *dev = data;
 	u8 *rx = dev->rx_bulk_buf;
 
-	if (!rx)
-		return -ENOMEM;
-
 	while (!kthread_should_stop()) {
+		struct it930x_cmd_req *req;
+		unsigned long flags;
 		int rx_len = 0;
 		u16 rx_csum, csum;
+		u8 seq, result;
 		int ret;
 
 		if (dev->stopping)
@@ -446,14 +280,9 @@ static int it930x_transport_rx_io_thread(void *data)
 		ret = it930x_bulk_xfer(dev, IT930X_EP_CMD_IN, rx,
 				       IT930X_CMD_MAX_PKT, &rx_len, true,
 				       IT930X_RX_IO_TIMEOUT_MS);
-		if (ret) {
-			if (ret == -ETIMEDOUT || ret == -EINTR)
-				continue;
+		if (ret)
 			continue;
-		}
-		if (rx_len <= 0)
-			continue;
-		if (rx_len > IT930X_CMD_MAX_PKT || rx_len < 5)
+		if (rx_len < 5 || rx_len > IT930X_CMD_MAX_PKT)
 			continue;
 
 		rx_csum = ((u16)rx[rx_len - 2] << 8) | rx[rx_len - 1];
@@ -461,42 +290,13 @@ static int it930x_transport_rx_io_thread(void *data)
 		if (csum != rx_csum)
 			continue;
 
-		it930x_rx_ring_push(dev, rx, rx_len);
-	}
-
-	return 0;
-}
-
-static int it930x_transport_rx_parse_thread(void *data)
-{
-	struct it930x_dev *dev = data;
-	struct it930x_rx_slot slot;
-
-	while (!kthread_should_stop()) {
-		struct it930x_cmd_req *req = NULL;
-		unsigned long flags;
-		u8 seq, result;
-
-		wait_event_interruptible(dev->rx_wq,
-					 dev->stopping || dev->rx_count ||
-					 kthread_should_stop());
-		if (dev->stopping || kthread_should_stop())
-			break;
-		if (!it930x_rx_ring_pop(dev, &slot))
-			continue;
-
-		if (slot.len < 5)
-			continue;
-
-		seq = slot.data[1];
-		result = slot.data[2];
+		seq = rx[1];
+		result = rx[2];
 
 		spin_lock_irqsave(&dev->pending_lock, flags);
 		req = dev->pending[seq];
-		if (req) {
+		if (req)
 			dev->pending[seq] = NULL;
-			req->pending = false;
-		}
 		spin_unlock_irqrestore(&dev->pending_lock, flags);
 
 		if (!req)
@@ -507,8 +307,8 @@ static int it930x_transport_rx_parse_thread(void *data)
 				"cmd seq=%u result=%u (error)\n", seq, result);
 			it930x_cmd_req_complete(req, -EIO, result, NULL, 0);
 		} else {
-			it930x_cmd_req_complete(req, 0, result, &slot.data[3],
-						slot.len - 5);
+			it930x_cmd_req_complete(req, 0, result, &rx[3],
+						rx_len - 5);
 		}
 		it930x_cmd_req_put(req);
 	}
@@ -520,26 +320,15 @@ static int it930x_transport_rx_parse_thread(void *data)
 
 static void it930x_transport_fail_all(struct it930x_dev *dev, int status)
 {
-	struct it930x_cmd_req *req, *tmp;
+	struct it930x_cmd_req *req;
 	unsigned long flags;
 	int i;
-
-	spin_lock_irqsave(&dev->tx_lock, flags);
-	list_for_each_entry_safe(req, tmp, &dev->tx_queue, node) {
-		list_del_init(&req->node);
-		req->queued = false;
-		it930x_cmd_req_complete(req, status, 0, NULL, 0);
-		it930x_cmd_req_put(req);
-	}
-	spin_unlock_irqrestore(&dev->tx_lock, flags);
 
 	for (i = 0; i <= U8_MAX; i++) {
 		spin_lock_irqsave(&dev->pending_lock, flags);
 		req = dev->pending[i];
-		if (req) {
+		if (req)
 			dev->pending[i] = NULL;
-			req->pending = false;
-		}
 		spin_unlock_irqrestore(&dev->pending_lock, flags);
 		if (!req)
 			continue;
@@ -554,19 +343,10 @@ static int it930x_transport_start(struct it930x_dev *dev)
 	int ret;
 
 	dev->stopping = false;
-	dev->tx_thread = NULL;
-	dev->rx_io_thread = NULL;
-	dev->rx_parse_thread = NULL;
-	spin_lock_init(&dev->tx_lock);
-	INIT_LIST_HEAD(&dev->tx_queue);
-	init_waitqueue_head(&dev->tx_wq);
+	mutex_init(&dev->tx_mutex);
 	spin_lock_init(&dev->pending_lock);
 	memset(dev->pending, 0, sizeof(dev->pending));
-	spin_lock_init(&dev->rx_lock);
-	dev->rx_head = 0;
-	dev->rx_tail = 0;
-	dev->rx_count = 0;
-	init_waitqueue_head(&dev->rx_wq);
+	dev->seq = 0;
 
 	dev->tx_bulk_buf = kmalloc(IT930X_CMD_MAX_PKT, GFP_KERNEL);
 	if (!dev->tx_bulk_buf)
@@ -578,43 +358,16 @@ static int it930x_transport_start(struct it930x_dev *dev)
 		goto err_free;
 	}
 
-	dev->tx_thread = kthread_run(it930x_transport_tx_thread, dev,
-				     "it930x_tx");
-	if (IS_ERR(dev->tx_thread)) {
-		ret = PTR_ERR(dev->tx_thread);
-		dev->tx_thread = NULL;
+	dev->rx_thread = kthread_run(it930x_rx_thread, dev, "it930x_rx");
+	if (IS_ERR(dev->rx_thread)) {
+		ret = PTR_ERR(dev->rx_thread);
+		dev->rx_thread = NULL;
 		goto err_free;
 	}
-	get_task_struct(dev->tx_thread);
-
-	dev->rx_io_thread = kthread_run(it930x_transport_rx_io_thread, dev,
-					"it930x_rxio");
-	if (IS_ERR(dev->rx_io_thread)) {
-		ret = PTR_ERR(dev->rx_io_thread);
-		dev->rx_io_thread = NULL;
-		goto err_stop_tx;
-	}
-	get_task_struct(dev->rx_io_thread);
-
-	dev->rx_parse_thread = kthread_run(it930x_transport_rx_parse_thread,
-					   dev, "it930x_rxparse");
-	if (IS_ERR(dev->rx_parse_thread)) {
-		ret = PTR_ERR(dev->rx_parse_thread);
-		dev->rx_parse_thread = NULL;
-		goto err_stop_rxio;
-	}
-	get_task_struct(dev->rx_parse_thread);
+	get_task_struct(dev->rx_thread);
 
 	return 0;
 
-err_stop_rxio:
-	kthread_stop(dev->rx_io_thread);
-	put_task_struct(dev->rx_io_thread);
-	dev->rx_io_thread = NULL;
-err_stop_tx:
-	kthread_stop(dev->tx_thread);
-	put_task_struct(dev->tx_thread);
-	dev->tx_thread = NULL;
 err_free:
 	kfree(dev->tx_bulk_buf);
 	kfree(dev->rx_bulk_buf);
@@ -625,28 +378,15 @@ err_free:
 
 static void it930x_transport_stop(struct it930x_dev *dev)
 {
-	struct task_struct *tx, *rx_io, *rx_parse;
+	struct task_struct *rx;
 
 	dev->stopping = true;
-	wake_up(&dev->tx_wq);
-	wake_up(&dev->rx_wq);
 
-	tx = xchg(&dev->tx_thread, NULL);
-	rx_io = xchg(&dev->rx_io_thread, NULL);
-	rx_parse = xchg(&dev->rx_parse_thread, NULL);
-
-	if (!IS_ERR_OR_NULL(tx))
-		kthread_stop(tx);
-	if (!IS_ERR_OR_NULL(rx_io))
-		kthread_stop(rx_io);
-	if (!IS_ERR_OR_NULL(rx_parse))
-		kthread_stop(rx_parse);
-	if (!IS_ERR_OR_NULL(tx))
-		put_task_struct(tx);
-	if (!IS_ERR_OR_NULL(rx_io))
-		put_task_struct(rx_io);
-	if (!IS_ERR_OR_NULL(rx_parse))
-		put_task_struct(rx_parse);
+	rx = xchg(&dev->rx_thread, NULL);
+	if (!IS_ERR_OR_NULL(rx)) {
+		kthread_stop(rx);
+		put_task_struct(rx);
+	}
 
 	it930x_transport_fail_all(dev, -ENODEV);
 	kfree(dev->tx_bulk_buf);
@@ -664,7 +404,7 @@ static int it930x_cmd_submit_sync(struct it930x_dev *dev, u16 cmd,
 	struct it930x_cmd_req *req;
 	unsigned long flags;
 	unsigned long tout;
-	bool removed;
+	int tx_len, actual;
 	int ret;
 
 	if (tx_payload_len > IT930X_CMD_MAX_PAYLOAD ||
@@ -677,7 +417,6 @@ static int it930x_cmd_submit_sync(struct it930x_dev *dev, u16 cmd,
 	if (!req)
 		return -ENOMEM;
 
-	INIT_LIST_HEAD(&req->node);
 	init_completion(&req->done);
 	kref_init(&req->refcount);
 	spin_lock_init(&req->state_lock);
@@ -687,46 +426,43 @@ static int it930x_cmd_submit_sync(struct it930x_dev *dev, u16 cmd,
 	if (tx_payload_len && tx_payload)
 		memcpy(req->tx_payload, tx_payload, tx_payload_len);
 
-	/* Enqueue */
-	spin_lock_irqsave(&dev->tx_lock, flags);
-	req->queued = true;
-	it930x_cmd_req_get(req);
-	list_add_tail(&req->node, &dev->tx_queue);
-	spin_unlock_irqrestore(&dev->tx_lock, flags);
-	wake_up(&dev->tx_wq);
+	/* Inline TX: assign seq, register pending, encode, send */
+	mutex_lock(&dev->tx_mutex);
 
-	/* Wait for completion */
+	req->seq = dev->seq++;
+
+	spin_lock_irqsave(&dev->pending_lock, flags);
+	if (dev->pending[req->seq]) {
+		spin_unlock_irqrestore(&dev->pending_lock, flags);
+		mutex_unlock(&dev->tx_mutex);
+		kfree(req);
+		return -EBUSY;
+	}
+	it930x_cmd_req_get(req);
+	dev->pending[req->seq] = req;
+	spin_unlock_irqrestore(&dev->pending_lock, flags);
+
+	ret = it930x_encode_tx_frame(req, dev->tx_bulk_buf, &tx_len);
+	if (!ret)
+		ret = it930x_bulk_xfer(dev, IT930X_EP_CMD_OUT, dev->tx_bulk_buf,
+				       tx_len, &actual, false,
+				       IT930X_USB_TIMEOUT_MS);
+
+	mutex_unlock(&dev->tx_mutex);
+
+	if (ret)
+		goto err_pending;
+
+	/* Wait for rx_thread to deliver the response */
 	tout = wait_for_completion_timeout(&req->done,
 					   msecs_to_jiffies(IT930X_CMD_WAIT_MS));
 	if (!tout) {
-		spin_lock_irqsave(&req->state_lock, flags);
-		req->cancelled = true;
-		spin_unlock_irqrestore(&req->state_lock, flags);
-
-		/* Remove from TX queue if still queued */
-		removed = false;
-		spin_lock_irqsave(&dev->tx_lock, flags);
-		if (req->queued) {
-			list_del_init(&req->node);
-			req->queued = false;
-			removed = true;
-		}
-		spin_unlock_irqrestore(&dev->tx_lock, flags);
-		if (removed)
-			it930x_cmd_req_put(req);
-
-		/* Remove from pending table */
-		removed = false;
 		spin_lock_irqsave(&dev->pending_lock, flags);
-		if (req->pending && dev->pending[req->seq] == req) {
+		if (dev->pending[req->seq] == req) {
 			dev->pending[req->seq] = NULL;
-			req->pending = false;
-			removed = true;
+			it930x_cmd_req_put(req);
 		}
 		spin_unlock_irqrestore(&dev->pending_lock, flags);
-		if (removed)
-			it930x_cmd_req_put(req);
-
 		ret = -ETIMEDOUT;
 		goto out;
 	}
@@ -738,6 +474,15 @@ static int it930x_cmd_submit_sync(struct it930x_dev *dev, u16 cmd,
 		dev_dbg(&dev->intf->dev,
 			"cmd 0x%04x failed: status=%d result=%u\n",
 			cmd, ret, req->result);
+	goto out;
+
+err_pending:
+	spin_lock_irqsave(&dev->pending_lock, flags);
+	if (dev->pending[req->seq] == req) {
+		dev->pending[req->seq] = NULL;
+		it930x_cmd_req_put(req);
+	}
+	spin_unlock_irqrestore(&dev->pending_lock, flags);
 
 out:
 	it930x_cmd_req_put(req);
