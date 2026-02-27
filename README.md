@@ -28,6 +28,8 @@ TBS 5530 supports ATSC 3.0, unlike the vendor driver.
 
 PX-MLT series (and ISDB6014) potentially support DVB-T/C/S/S2, unlike other drivers. (Not tested)
 
+Zenview HDTV Mate has Microchip ATECC608. You can access it through i2c address `0xc8`.
+
 ## Modules
 
 | Module | Description |
