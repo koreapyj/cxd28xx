@@ -180,6 +180,14 @@ dvbv5-zap -c channels.conf "ATSC3_STATION"
 sudo ip link set atsc0 up
 ```
 
+To identify which DVB adapter an `atscN` interface belongs to, check its sysfs parent device:
+
+```sh
+readlink /sys/class/net/atsc0/device
+```
+
+This points to the same USB device as the corresponding DVB adapter.
+
 The `atsc3_alp.ko` module is shared between all bridge drivers.
 
 ## License

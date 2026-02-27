@@ -706,6 +706,7 @@ static int tbs5530_probe(struct usb_interface *intf,
 
 	/* ATSC 3.0 ALP network interface (non-fatal) */
 	dev->alp.fe = dev->fe_ter;
+	dev->alp.dev = dev->dvb_adapter.device;
 	dev->alp.start_streaming = tbs5530_alp_start;
 	dev->alp.stop_streaming = tbs5530_alp_stop;
 	dev->alp.priv = dev;

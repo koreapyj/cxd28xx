@@ -34,6 +34,7 @@ struct atsc3_alp {
 	u8 *buf;
 	unsigned int pos;
 	struct dvb_frontend *fe;
+	struct device *dev;		/* parent device for sysfs association */
 	int (*start_streaming)(void *priv);
 	void (*stop_streaming)(void *priv);
 	void *priv;

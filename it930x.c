@@ -2319,6 +2319,7 @@ static int it930x_dvb_init(struct it930x_dev *dev)
 
 		/* ATSC 3.0 ALP (non-fatal) */
 		ife->alp.fe = ife->fe;
+		ife->alp.dev = ife->adapter.device;
 		ife->alp.start_streaming = it930x_alp_start;
 		ife->alp.stop_streaming = it930x_alp_stop;
 		ife->alp.priv = ife;

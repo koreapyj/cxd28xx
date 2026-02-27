@@ -266,6 +266,16 @@ static void atsc3_net_setup(struct net_device *net)
 
 int atsc3_alp_register_netdev(struct atsc3_alp *alp)
 {
+	int i;
+
+	if (!alp->fe)
+		return 0;
+
+	for (i = 0; i < MAX_DELSYS && alp->fe->ops.delsys[i]; i++)
+		if (alp->fe->ops.delsys[i] == SYS_ATSC3)
+			goto found;
+	return 0;
+found:
 	alp->buf = kmalloc(ALP_BUF_SIZE, GFP_KERNEL);
 	if (!alp->buf)
 		return -ENOMEM;
@@ -279,6 +289,8 @@ int atsc3_alp_register_netdev(struct atsc3_alp *alp)
 		return -ENOMEM;
 	}
 
+	if (alp->dev)
+		SET_NETDEV_DEV(alp->net, alp->dev);
 	alp->net->ml_priv = alp;
 	if (register_netdev(alp->net)) {
 		free_netdev(alp->net);
