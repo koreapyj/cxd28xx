@@ -165,7 +165,8 @@ struct sony_freia_terr_adjust_param_t {
     SONY_ASCOT3_CHIP_ID_2871,     /**< CXD2871 (for TV) */
     SONY_ASCOT3_CHIP_ID_2872,     /**< CXD2872 (for STB) */
     SONY_ASCOT3_CHIP_ID_2871A,    /**< CXD2871A (ASCOT3I) (for TV) */
-    SONY_ASCOT3_CHIP_ID_2875      /**< CXD2875 */
+    SONY_ASCOT3_CHIP_ID_2875,     /**< CXD2875 */
+    SONY_ASCOT3_CHIP_ID_2858      /**< CXD2858ER (HELENE) */
 } ;
 enum sony_dtv_system_t{
     SONY_DTV_SYSTEM_UNKNOWN,        /**< Unknown. */

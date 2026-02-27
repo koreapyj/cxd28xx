@@ -87,7 +87,9 @@ struct cxd2878_config{
 	void (*RF_switch)(struct i2c_adapter * i2c,u8 rf_in,u8 flag);
 	u8 rf_port; //for change command
 	void (*TS_switch)(struct i2c_adapter * i2c,u8 flag);  //5590
-	void (*LED_switch)(struct i2c_adapter * i2c,u8 flag); //5590	
+	void (*LED_switch)(struct i2c_adapter * i2c,u8 flag); //5590
+	int (*set_lnb)(struct i2c_adapter *i2c, int on);
+	struct dvb_frontend **fe_sat; /* output: satellite fe for CXD2856, NULL to skip */
 };
 
 #if IS_REACHABLE(CONFIG_DVB_CXD2878)

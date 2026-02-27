@@ -1,5 +1,8 @@
 /*
- * ITE IT930x USB bridge driver for CXD2878 demod + tuner
+ * ITE IT930x USB bridge driver for CXD2878/CXD2856 demod + tuner
+ *
+ * Supports single-frontend (Geniatech HDTV Mate) and multi-frontend
+ * (PLEX PX-MLT series, Digibest ISDB6014) devices.
  *
  * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
  */
@@ -25,10 +28,10 @@
 /* -------- IT930x bridge constants -------- */
 
 /* Command IDs */
-#define IT930X_CMD_REG_READ			0x0000
+#define IT930X_CMD_REG_READ		0x0000
 #define IT930X_CMD_REG_WRITE		0x0001
 #define IT930X_CMD_QUERYINFO		0x0022
-#define IT930X_CMD_BOOT				0x0023
+#define IT930X_CMD_BOOT			0x0023
 #define IT930X_CMD_FW_SCATTER_WRITE	0x0029
 #define IT930X_CMD_GENERIC_I2C_RD	0x002a
 #define IT930X_CMD_GENERIC_I2C_WR	0x002b
@@ -40,24 +43,20 @@
 
 /* Protocol limits */
 #define IT930X_CMD_MAX_PKT		512
-#define IT930X_CMD_MAX_PAYLOAD	250
+#define IT930X_CMD_MAX_PAYLOAD		250
 #define IT930X_CMD_HDR_LEN		4
 #define IT930X_CMD_CSUM_LEN		2
-#define IT930X_USB_TIMEOUT_MS	1000
+#define IT930X_USB_TIMEOUT_MS		1000
 #define IT930X_CMD_WAIT_MS		2000
-#define IT930X_RX_IO_TIMEOUT_MS	200
+#define IT930X_RX_IO_TIMEOUT_MS		200
 
 /* I2C limits */
-#define IT930X_I2C_SHORT_MAX	40
-#define IT930X_I2C_STAGE_CHUNK	40
-#define IT930X_I2C_BUS_IDX		3	/* IT930x bus for CXD2878 */
+#define IT930X_I2C_SHORT_MAX		40
+#define IT930X_I2C_STAGE_CHUNK		40
 
 /* TS streaming */
 #define IT930X_URB_COUNT		4
 #define IT930X_URB_BUF_SIZE		(188 * 816)
-
-/* Firmware */
-#define IT9306_FIRMWARE_FILE	"dvb-usb-it9306-01.fw"
 
 /* Bridge registers */
 #define IT930X_REG_CLK_DISABLE		0x4976
@@ -66,38 +65,193 @@
 #define IT930X_REG_EXT_CLK_RESET	0x4977
 #define IT930X_REG_I2C_BUS0_SPEED	0xf6a7
 #define IT930X_REG_I2C_BUS1_SPEED	0xf103
-#define IT930X_REG_I2C_TRIG			0x4900
-#define IT930X_REG_I2C_READ_BUF		0xf000
+#define IT930X_REG_I2C_TRIG		0x4900
+#define IT930X_REG_I2C_READ_BUF	0xf000
 #define IT930X_REG_I2C_WRITE_BUF	0xf001
-#define IT930X_REG_I2C_BUS_CTRL		0xf424
+#define IT930X_REG_I2C_BUS_CTRL	0xf424
 #define IT930X_REG_TS_FAIL_IGNORE	0xda5a
-#define IT930X_REG_I2C_BUS0_EN		0xd8d4
-#define IT930X_REG_I2C_BUS1_EN		0xd8d5
-#define IT930X_REG_I2C_RESET		0xd8d3
 #define IT930X_REG_TS_SYNC_BYPASS	0xda1a
 #define IT930X_REG_TS_OUT_EN		0xd833
 #define IT930X_REG_TS_OUT_CFG0		0xd830
 #define IT930X_REG_TS_OUT_CFG1		0xd831
 #define IT930X_REG_TS_OUT_CFG2		0xd832
-/* GPIO registers */
-#define IT930X_REG_GPIO2_VALUE		0xd8b7
-#define IT930X_REG_GPIO2_EN			0xd8b8
-#define IT930X_REG_GPIO2_DIRECTION	0xd8b9
-#define IT930X_REG_GPIO14_VALUE		0xd8e3
-#define IT930X_REG_GPIO14_EN		0xd8e4
-#define IT930X_REG_GPIO14_DIRECTION	0xd8e5
-/* Hardware PID filter registers (TS port 0) */
-#define IT930X_REG_PID_DAT_H		0xda17
-#define IT930X_REG_PID_DAT_L		0xda16
-#define IT930X_REG_PID_INDEX_EN		0xda14
-#define IT930X_REG_PID_INDEX		0xda15
-#define IT930X_REG_MAP_INDEX		0xda11
-#define IT930X_REG_REMAP_MODE		0xda13
-#define IT930X_REG_AGGRE_MODE		0xda73
-#define IT930X_REG_PID_OFFSET_L		0xda81
-#define IT930X_REG_PID_OFFSET_H		0xda82
 
 #define IT930X_PID_FILTER_MAX		64
+
+/* -------- GPIO register table -------- */
+
+/*
+ * IT930x has 16 GPIOs. Each GPIO has three registers:
+ *   en  — direction (1 = output)
+ *   on  — enable    (1 = enabled)
+ *   val — output value
+ * Indexed 0-15 for GPIO 1-16.
+ */
+struct it930x_gpio_regs {
+	u32 en;
+	u32 on;
+	u32 val;
+};
+
+static const struct it930x_gpio_regs it930x_gpio[16] = {
+	{ 0xd8b0, 0xd8b1, 0xd8af },	/* GPIO 1  */
+	{ 0xd8b8, 0xd8b9, 0xd8b7 },	/* GPIO 2  */
+	{ 0xd8b4, 0xd8b5, 0xd8b3 },	/* GPIO 3  */
+	{ 0xd8c0, 0xd8c1, 0xd8bf },	/* GPIO 4  */
+	{ 0xd8bc, 0xd8bd, 0xd8bb },	/* GPIO 5  */
+	{ 0xd8c8, 0xd8c9, 0xd8c7 },	/* GPIO 6  */
+	{ 0xd8c4, 0xd8c5, 0xd8c3 },	/* GPIO 7  */
+	{ 0xd8d0, 0xd8d1, 0xd8cf },	/* GPIO 8  */
+	{ 0xd8cc, 0xd8cd, 0xd8cb },	/* GPIO 9  */
+	{ 0xd8d8, 0xd8d9, 0xd8d7 },	/* GPIO 10 */
+	{ 0xd8d4, 0xd8d5, 0xd8d3 },	/* GPIO 11 */
+	{ 0xd8e0, 0xd8e1, 0xd8df },	/* GPIO 12 */
+	{ 0xd8dc, 0xd8dd, 0xd8db },	/* GPIO 13 */
+	{ 0xd8e4, 0xd8e5, 0xd8e3 },	/* GPIO 14 */
+	{ 0xd8e8, 0xd8e9, 0xd8e7 },	/* GPIO 15 */
+	{ 0xd8ec, 0xd8ed, 0xd8eb },	/* GPIO 16 */
+};
+
+/* -------- Board configuration -------- */
+
+#define IT930X_MAX_FRONTENDS	5
+
+struct it930x_fe_cfg {
+	u8 ts_port;	/* IT930x stream input port (0-4) */
+	u8 i2c_bus;	/* IT930x internal bus: 1 or 3 */
+	u8 demod_addr;	/* demod SLVT 7-bit I2C address */
+	u8 tuner_addr;	/* tuner 7-bit I2C address */
+};
+
+struct it930x_board_cfg {
+	const char		*name;
+	const char		*fw_file;
+	int			num_frontends;
+	struct it930x_fe_cfg	fe[IT930X_MAX_FRONTENDS];
+	u8			gpio_power;	/* backend power GPIO (active low), 0=none */
+	u8			gpio_reset;	/* demod reset GPIO (pulse low) */
+	u8			gpio_lnb;	/* LNB power GPIO (active high), 0=none */
+	u8			gpio_always_hi;	/* GPIO set high at init, 0=none */
+	u8			f41a_val;	/* 0x05=DVB, 0x01=ISDB-T */
+	u8			i2c_notify;	/* override 0x4975 value, 0=use demod_addr<<1 */
+};
+
+static const struct it930x_board_cfg it930x_boards[] = {
+	[0] = {	/* Geniatech HDTV Mate */
+		.name		= "Geniatech HDTV Mate",
+		.fw_file	= "dvb-usb-it9306-01.fw",
+		.num_frontends	= 1,
+		.fe		= {
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 0,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 0,
+		.gpio_always_hi	= 14,
+		.f41a_val	= 0x05,
+		.i2c_notify	= 0x38,
+	},
+	[1] = {	/* PLEX PX-MLT5U */
+		.name		= "PLEX PX-MLT5U",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 5,
+		.fe = {
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 3, .i2c_bus = 1,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 1, .i2c_bus = 1,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+			{ .ts_port = 2, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+	},
+	[2] = {	/* PLEX PX-MLT5PE */
+		.name		= "PLEX PX-MLT5PE",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 5,
+		.fe = {
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 1, .i2c_bus = 1,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 2, .i2c_bus = 1,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+			{ .ts_port = 3, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+	},
+	[3] = {	/* PLEX PX-MLT8PE3 */
+		.name		= "PLEX PX-MLT8PE3",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 3,
+		.fe = {
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 3, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+	},
+	[4] = {	/* PLEX PX-MLT8PE5 */
+		.name		= "PLEX PX-MLT8PE5",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 5,
+		.fe = {
+			{ .ts_port = 0, .i2c_bus = 1,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 1, .i2c_bus = 1,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+			{ .ts_port = 2, .i2c_bus = 1,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 3, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+	},
+	[5] = {	/* Digibest ISDB6014 4TS */
+		.name		= "Digibest ISDB6014 4TS",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 4,
+		.fe = {
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 1, .i2c_bus = 1,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 2, .i2c_bus = 1,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+	},
+};
 
 /* -------- Data structures -------- */
 
@@ -114,6 +268,28 @@ struct it930x_cmd_req {
 	u8 rx_payload[IT930X_CMD_MAX_PAYLOAD];
 	u8 result;
 	int status;
+};
+
+struct it930x_i2c_ctx {
+	struct it930x_dev *dev;
+	u8 bus_num;
+};
+
+struct it930x_fe_ctx {
+	struct it930x_dev	*dev;
+	int			idx;
+	struct i2c_adapter	*i2c;
+
+	struct cxd2878_config	demod_cfg;
+	struct dvb_frontend	*fe;
+	struct dvb_frontend	*fe_sat;	/* satellite virtual fe, or NULL */
+	struct dvb_adapter	adapter;
+	struct dvb_demux	demux;
+	struct dmxdev		dmxdev;
+	struct dvb_net		dvbnet;
+
+	int			feeding;
+	struct atsc3_alp	alp;
 };
 
 struct it930x_dev {
@@ -133,18 +309,23 @@ struct it930x_dev {
 
 	u32 fw_version;
 
-	/* I2C */
-	struct i2c_adapter i2c;
+	/* Board config */
+	const struct it930x_board_cfg *board;
 
-	/* DVB */
-	const char *devname;
-	struct dvb_adapter dvb_adapter;
-	struct dvb_frontend *fe;
-	struct dvb_demux demux;
-	struct dmxdev dmxdev;
-	struct dvb_net dvbnet;
-	int feeding;
-	bool hw_pid_active;	/* HW PID filter engine on (aggre_mode=3) */
+	/* Multi-bus I2C: [0]=bus 1, [1]=bus 3 */
+	struct it930x_i2c_ctx i2c_ctx[2];
+	struct i2c_adapter i2c[2];
+
+	/* Per-frontend DVB state */
+	struct it930x_fe_ctx fes[IT930X_MAX_FRONTENDS];
+
+	/* Shared streaming state */
+	int stream_count;
+	struct mutex stream_lock;
+
+	/* LNB power reference count */
+	int lnb_count;
+	struct mutex lnb_lock;
 
 	/* TS streaming */
 	struct urb *urbs[IT930X_URB_COUNT];
@@ -152,17 +333,14 @@ struct it930x_dev {
 	dma_addr_t urb_dma[IT930X_URB_COUNT];
 	bool streaming;
 
-	/* Streaming stats (updated in URB completion, printed on stop) */
+	/* Streaming stats */
 	unsigned long urb_complete_ok;
 	unsigned long urb_complete_err;
 	unsigned long urb_complete_empty;
 	u64 urb_bytes_total;
-
-	/* ATSC 3.0 network interface */
-	struct atsc3_alp alp;
 };
 
-static short adapter_nr[] = { [0 ... 3] = -1 };
+static short adapter_nr[] = { [0 ... 19] = -1 };
 
 /* -------- Checksum -------- */
 
@@ -557,6 +735,60 @@ static int it930x_patch_reg_bit(struct it930x_dev *dev, u32 reg, u8 val,
 	return it930x_write_reg(dev, reg, next);
 }
 
+/* -------- GPIO helpers -------- */
+
+/*
+ * Set a GPIO to output mode with the given value.
+ * Caller must hold dev->io_lock.
+ */
+static int it930x_gpio_set(struct it930x_dev *dev, u8 gpio, bool val)
+{
+	const struct it930x_gpio_regs *g;
+	int ret;
+
+	if (gpio < 1 || gpio > 16)
+		return -EINVAL;
+
+	g = &it930x_gpio[gpio - 1];
+
+	ret = it930x_write_reg(dev, g->en, 0x01);	/* direction = output */
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, g->on, 0x01);	/* enable */
+	if (ret)
+		return ret;
+	return it930x_write_reg(dev, g->val, val ? 0x01 : 0x00);
+}
+
+/*
+ * Pulse a GPIO low then high (reset pulse).
+ * Caller must hold dev->io_lock.
+ */
+static int it930x_gpio_pulse(struct it930x_dev *dev, u8 gpio)
+{
+	const struct it930x_gpio_regs *g;
+	int ret;
+
+	if (gpio < 1 || gpio > 16)
+		return -EINVAL;
+
+	g = &it930x_gpio[gpio - 1];
+
+	ret = it930x_write_reg(dev, g->val, 0x01);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, g->en, 0x01);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, g->on, 0x01);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, g->val, 0x00);
+	if (ret)
+		return ret;
+	return it930x_write_reg(dev, g->val, 0x01);
+}
+
 /* -------- Firmware loading -------- */
 
 static int it930x_read_firmware_version(struct it930x_dev *dev, u32 *ver)
@@ -579,14 +811,14 @@ static int it930x_read_firmware_version(struct it930x_dev *dev, u32 *ver)
 static int it930x_load_firmware(struct it930x_dev *dev)
 {
 	const struct firmware *fw;
+	const char *fw_file = dev->board->fw_file;
 	size_t i = 0;
 	int ret;
 
-	ret = request_firmware(&fw, IT9306_FIRMWARE_FILE, &dev->intf->dev);
+	ret = request_firmware(&fw, fw_file, &dev->intf->dev);
 	if (ret) {
 		dev_err(&dev->intf->dev,
-			"failed to load firmware %s (%d)\n",
-			IT9306_FIRMWARE_FILE, ret);
+			"failed to load firmware %s (%d)\n", fw_file, ret);
 		return ret;
 	}
 
@@ -775,59 +1007,45 @@ static int it930x_i2c_read(struct it930x_dev *dev, u8 bus, u8 slave,
  * The IT930x bridge uses register F424 to implement I2C repeated-start:
  *   F424 = 0x01: hold bus (suppress STOP after next I2C write)
  *   F424 = 0x00: release bus (normal STOP behavior)
- *
- * Vendor sequence for a register read:
- *   1. REG_WRITE F424 = 0x01   (hold bus)
- *   2. GENERIC_I2C_WR sub-addr (START-addr_W-subaddr, no STOP)
- *   3. REG_WRITE F424 = 0x00   (release bus)
- *   4. GENERIC_I2C_RD data     (REPEATED_START-addr_R-data-STOP)
  */
-static int it930x_i2c_xfer_rstart(struct it930x_dev *dev,
+static int it930x_i2c_xfer_rstart(struct it930x_dev *dev, u8 bus,
 				  struct i2c_msg *wr, struct i2c_msg *rd)
 {
 	u8 wr_slave = wr->addr << 1;
 	u8 rd_slave = rd->addr << 1;
 	int ret;
 
-	/* Set bus hold — suppress STOP after the write */
 	ret = it930x_write_reg(dev, IT930X_REG_I2C_BUS_CTRL, 0x01);
 	if (ret)
 		return ret;
 
-	/* Sub-address write (will not STOP because bus is held) */
-	ret = it930x_i2c_write(dev, IT930X_I2C_BUS_IDX,
-			       wr_slave, wr->buf, wr->len);
+	ret = it930x_i2c_write(dev, bus, wr_slave, wr->buf, wr->len);
 	if (ret) {
 		it930x_write_reg(dev, IT930X_REG_I2C_BUS_CTRL, 0x00);
 		return ret;
 	}
 
-	/* Release bus hold — next operation gets normal STOP */
 	ret = it930x_write_reg(dev, IT930X_REG_I2C_BUS_CTRL, 0x00);
 	if (ret)
 		return ret;
 
-	/* Data read (REPEATED_START-addr_R-data-STOP) */
-	return it930x_i2c_read(dev, IT930X_I2C_BUS_IDX,
-			       rd_slave, rd->buf, rd->len);
+	return it930x_i2c_read(dev, bus, rd_slave, rd->buf, rd->len);
 }
 
 static int it930x_i2c_xfer(struct i2c_adapter *adap,
 			    struct i2c_msg *msgs, int num)
 {
-	struct it930x_dev *dev = i2c_get_adapdata(adap);
+	struct it930x_i2c_ctx *ctx = i2c_get_adapdata(adap);
+	struct it930x_dev *dev = ctx->dev;
+	u8 bus = ctx->bus_num;
 	int i, ret = 0;
 
 	mutex_lock(&dev->io_lock);
 
-	/*
-	 * Detect write-then-read pattern (2 messages: write + read).
-	 * Use F424 bus control to implement I2C repeated-start.
-	 */
 	if (num == 2 &&
 	    !(msgs[0].flags & I2C_M_RD) && (msgs[1].flags & I2C_M_RD) &&
 	    msgs[0].len <= U8_MAX && msgs[1].len <= U8_MAX) {
-		ret = it930x_i2c_xfer_rstart(dev, &msgs[0], &msgs[1]);
+		ret = it930x_i2c_xfer_rstart(dev, bus, &msgs[0], &msgs[1]);
 		if (ret)
 			dev_dbg(&dev->intf->dev,
 				"i2c rstart addr=0x%02x wr=%u rd=%u failed: %d\n",
@@ -846,10 +1064,10 @@ static int it930x_i2c_xfer(struct i2c_adapter *adap,
 		}
 
 		if (msgs[i].flags & I2C_M_RD)
-			ret = it930x_i2c_read(dev, IT930X_I2C_BUS_IDX,
+			ret = it930x_i2c_read(dev, bus,
 					      slave, msgs[i].buf, msgs[i].len);
 		else
-			ret = it930x_i2c_write(dev, IT930X_I2C_BUS_IDX,
+			ret = it930x_i2c_write(dev, bus,
 					       slave, msgs[i].buf,
 					       msgs[i].len);
 		if (ret) {
@@ -878,49 +1096,61 @@ static const struct i2c_algorithm it930x_i2c_algo = {
 
 /* -------- Bridge initialization -------- */
 
-struct it930x_reg_val {
-	u32 reg;
-	u8 val;
-};
-
-static int it930x_write_reg_table(struct it930x_dev *dev,
-				  const struct it930x_reg_val *tbl, int count)
+static int it930x_stage_pre_init(struct it930x_dev *dev)
 {
-	int i, ret;
+	const struct it930x_board_cfg *board = dev->board;
+	int ret;
 
-	for (i = 0; i < count; i++) {
-		if (tbl[i].reg == 0x0) {
-			mdelay((u32)tbl[i].val * 10);
-			continue;
-		}
-		ret = it930x_write_reg(dev, tbl[i].reg, tbl[i].val);
+	ret = it930x_write_reg(dev, 0xda05, 0x01);
+	if (ret)
+		return ret;
+
+	/* GPIO reset pulse */
+	ret = it930x_gpio_pulse(dev, board->gpio_reset);
+	if (ret)
+		return ret;
+
+	/* GPIO always-high (Geniatech: GPIO14 for power rail) */
+	if (board->gpio_always_hi) {
+		ret = it930x_gpio_set(dev, board->gpio_always_hi, true);
 		if (ret)
 			return ret;
 	}
-	return 0;
-}
 
-static int it930x_stage_pre_init(struct it930x_dev *dev)
-{
-	static const struct it930x_reg_val regs[] = {
-		{ 0xda05, 0x01 },
-		{ IT930X_REG_GPIO2_VALUE, 1 },
-		{ IT930X_REG_GPIO2_EN, 1 },
-		{ IT930X_REG_GPIO2_DIRECTION, 1 },
-		{ IT930X_REG_GPIO2_VALUE, 0 },
-		{ IT930X_REG_GPIO2_VALUE, 1 },
-		{ IT930X_REG_GPIO14_EN, 1 },
-		{ IT930X_REG_GPIO14_DIRECTION, 1 },
-		{ IT930X_REG_GPIO14_VALUE, 1 },
-		{ IT930X_REG_CLK_DISABLE, 0x00 },
-		{ IT930X_REG_PLL_RESET, 0x00 },
-		{ IT930X_REG_TS_CLK_CFG, 0x00 },
-		{ IT930X_REG_EXT_CLK_RESET, 0x00 },
-		{ IT930X_REG_I2C_BUS0_SPEED, 0x07 },
-		{ IT930X_REG_I2C_BUS1_SPEED, 0x07 },
-		{ IT930X_REG_TS_SYNC_BYPASS, 0x00 },
-	};
-	return it930x_write_reg_table(dev, regs, ARRAY_SIZE(regs));
+	/* Backend power GPIO: set HIGH initially (power off, active low) */
+	if (board->gpio_power) {
+		ret = it930x_gpio_set(dev, board->gpio_power, true);
+		if (ret)
+			return ret;
+	}
+
+	/* LNB power GPIO: set LOW initially (off) */
+	if (board->gpio_lnb) {
+		ret = it930x_gpio_set(dev, board->gpio_lnb, false);
+		if (ret)
+			return ret;
+	}
+
+	/* Clock/PLL/I2C speed common init */
+	ret = it930x_write_reg(dev, IT930X_REG_CLK_DISABLE, 0x00);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, IT930X_REG_PLL_RESET, 0x00);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, IT930X_REG_TS_CLK_CFG, 0x00);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, IT930X_REG_EXT_CLK_RESET, 0x00);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, IT930X_REG_I2C_BUS0_SPEED, 0x07);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, IT930X_REG_I2C_BUS1_SPEED, 0x07);
+	if (ret)
+		return ret;
+	return it930x_write_reg(dev, IT930X_REG_TS_SYNC_BYPASS, 0x00);
 }
 
 static int it930x_stage_fw_ready(struct it930x_dev *dev)
@@ -961,17 +1191,18 @@ static int it930x_stage_fw_ready(struct it930x_dev *dev)
 
 /*
  * Post-boot bridge configuration.
- * Matches vendor USB trace exactly — both cold and warm boot.
- * Key operations: I2C controller config (f41a), TS clock bit 5 toggle
- * (dd11), TS port enable/disable (da1d), clock save/restore (da05/da06),
- * TS output config, I2C bus enable, GPIO demod reset, I2C passthrough.
+ * Key operations: I2C controller config, TS clock toggle, I2C slave
+ * address registration, GPIO reset pulse, TS output config.
  */
 static int it930x_stage_post_boot(struct it930x_dev *dev)
 {
+	const struct it930x_board_cfg *board = dev->board;
+	static const u32 addr_regs[] = { 0x4975, 0x4974, 0x4973, 0x4972, 0x4964 };
+	static const u32 bus_regs[]  = { 0x4971, 0x4970, 0x496f, 0x496e, 0x4963 };
 	u8 dd88[2] = { IT930X_URB_BUF_SIZE / 4 & 0xff,
 		       (IT930X_URB_BUF_SIZE / 4 >> 8) & 0xff };
 	u8 val;
-	int ret;
+	int ret, i;
 
 	/* I2C bus speeds (must re-set after firmware boot) */
 	ret = it930x_write_reg(dev, IT930X_REG_I2C_BUS0_SPEED, 0x07);
@@ -993,7 +1224,7 @@ static int it930x_stage_post_boot(struct it930x_dev *dev)
 	ret = it930x_write_reg(dev, 0xda10, 0x00);
 	if (ret)
 		return ret;
-	ret = it930x_write_reg(dev, 0xf41a, 0x05);
+	ret = it930x_write_reg(dev, 0xf41a, board->f41a_val);
 	if (ret)
 		return ret;
 
@@ -1004,10 +1235,7 @@ static int it930x_stage_post_boot(struct it930x_dev *dev)
 
 	/*
 	 * TS clock config with bit 5 toggle on dd11.
-	 * Vendor reads dd11, writes with bit 5 cleared, writes dd13,
-	 * then reads dd11 again and writes with bit 5 set.
-	 * This toggle is required even on warm boot when bit 5 is
-	 * already set — skipping it causes SLV-T NACK.
+	 * This toggle is required even on warm boot.
 	 */
 	ret = it930x_read_reg(dev, 0xdd11, &val);
 	if (ret)
@@ -1016,7 +1244,7 @@ static int it930x_stage_post_boot(struct it930x_dev *dev)
 	if (ret)
 		return ret;
 
-	ret = it930x_write_reg(dev, 0xdd13, 0x1b);
+	ret = it930x_write_reg(dev, 0xdd13, 0x00);
 	if (ret)
 		return ret;
 
@@ -1065,68 +1293,106 @@ static int it930x_stage_post_boot(struct it930x_dev *dev)
 	if (ret)
 		return ret;
 
-	/* TS port config */
+	/* I2C slave address/bus registration for each frontend */
 	ret = it930x_write_reg(dev, IT930X_REG_CLK_DISABLE, 0x01);
 	if (ret)
 		return ret;
-	ret = it930x_write_reg(dev, 0x4975, 0x38);
-	if (ret)
-		return ret;
-	ret = it930x_write_reg(dev, 0x4971, 0x03);
+
+	for (i = 0; i < board->num_frontends; i++) {
+		const struct it930x_fe_cfg *fc = &board->fe[i];
+		u8 addr_val;
+
+		if (i == 0 && board->i2c_notify)
+			addr_val = board->i2c_notify;
+		else
+			addr_val = fc->demod_addr << 1;
+
+		ret = it930x_write_reg(dev, addr_regs[i], addr_val);
+		if (ret)
+			return ret;
+		ret = it930x_write_reg(dev, bus_regs[i], fc->i2c_bus);
+		if (ret)
+			return ret;
+	}
+
+	/* GPIO11 output high (Geniatech I2C bus enable / PX-MLT LNB off) */
+	ret = it930x_gpio_set(dev, 11, true);
 	if (ret)
 		return ret;
 
-	/* I2C bus enable */
-	ret = it930x_write_reg(dev, IT930X_REG_I2C_BUS0_EN, 0x01);
-	if (ret)
-		return ret;
-	ret = it930x_write_reg(dev, IT930X_REG_I2C_BUS1_EN, 0x01);
-	if (ret)
-		return ret;
-	ret = it930x_write_reg(dev, IT930X_REG_I2C_RESET, 0x01);
+	/* GPIO reset pulse after I2C slave config */
+	ret = it930x_gpio_pulse(dev, board->gpio_reset);
 	if (ret)
 		return ret;
 
-	/* GPIO2 demod reset pulse */
-	ret = it930x_write_reg(dev, IT930X_REG_GPIO2_EN, 0x01);
-	if (ret)
-		return ret;
-	ret = it930x_write_reg(dev, IT930X_REG_GPIO2_DIRECTION, 0x01);
-	if (ret)
-		return ret;
-	ret = it930x_write_reg(dev, IT930X_REG_GPIO2_VALUE, 0x00);
-	if (ret)
-		return ret;
-	ret = it930x_write_reg(dev, IT930X_REG_GPIO2_VALUE, 0x01);
-	if (ret)
-		return ret;
-
-	/* Ignore TS input failures on all ports (demod may not have valid
-	 * TS clock until it locks to a signal) */
+	/* Ignore TS input failures on all ports */
 	return it930x_write_reg(dev, IT930X_REG_TS_FAIL_IGNORE, 0x1f);
 }
 
 /*
  * TS input port configuration.
- * Written after bridge init and demod/tuner probe to enable
- * TS data flow from CXD6801 through the bridge to USB.
- * Register values from vendor USB warm-boot trace.
+ * For single-frontend boards: standard 0x47 sync, no aggregation.
+ * For multi-frontend boards: per-port sync byte aggregation.
  */
 static int it930x_stage_ts_port_cfg(struct it930x_dev *dev)
 {
-	static const struct it930x_reg_val regs[] = {
-		{ 0xda34, 0x01 },
-		{ 0xda58, 0x00 },	/* TS input type (serial) */
-		{ 0xda51, 0xbc },
-		{ 0xda73, 0x00 },
-		{ 0xda5f, 0x7a },
-		{ 0xda60, 0x61 },
-		{ 0xda61, 0x33 },
-		{ 0xda62, 0x00 },
-		{ 0xda4c, 0x01 },	/* TS port 0 enable */
-		{ IT930X_REG_TS_FAIL_IGNORE, 0x1f },
-	};
-	return it930x_write_reg_table(dev, regs, ARRAY_SIZE(regs));
+	const struct it930x_board_cfg *board = dev->board;
+	int i, ret;
+
+	/* Global TS input registers */
+	ret = it930x_write_reg(dev, 0xda34, 0x01);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, 0xda51, 0xbc);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, 0xda5f, 0x7a);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, 0xda60, 0x61);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, 0xda61, 0x33);
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, 0xda62, 0x00);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < board->num_frontends; i++) {
+		u8 port = board->fe[i].ts_port;
+
+		/* Serial mode for ports 0-1 */
+		if (port < 2) {
+			ret = it930x_write_reg(dev, 0xda58 + port, 0x00);
+			if (ret)
+				return ret;
+		}
+
+		if (board->num_frontends > 1) {
+			/* Sync-byte aggregation mode */
+			u8 sync = (u8)(((i + 1) << 4) | 0x07);
+
+			ret = it930x_write_reg(dev, 0xda73 + port, 0x01);
+			if (ret)
+				return ret;
+			ret = it930x_write_reg(dev, 0xda78 + port, sync);
+			if (ret)
+				return ret;
+		} else {
+			/* No aggregation — standard 0x47 */
+			ret = it930x_write_reg(dev, 0xda73 + port, 0x00);
+			if (ret)
+				return ret;
+		}
+
+		/* Enable port */
+		ret = it930x_write_reg(dev, 0xda4c + port, 0x01);
+		if (ret)
+			return ret;
+	}
+
+	return it930x_write_reg(dev, IT930X_REG_TS_FAIL_IGNORE, 0x1f);
 }
 
 static int it930x_hw_init(struct it930x_dev *dev)
@@ -1184,22 +1450,75 @@ static int it930x_validate_endpoints(struct usb_interface *intf)
 	return 0;
 }
 
-/* Forward declarations for streaming (used by net device ops) */
+/* Forward declarations for streaming */
 static int it930x_start_streaming(struct it930x_dev *dev);
 static void it930x_stop_streaming(struct it930x_dev *dev);
 
 /* ALP streaming callbacks for atsc3_alp module */
 static int it930x_alp_start(void *priv)
 {
-	return it930x_start_streaming(priv);
+	struct it930x_fe_ctx *ife = priv;
+	struct it930x_dev *dev = ife->dev;
+	int ret = 0;
+
+	mutex_lock(&dev->stream_lock);
+	if (dev->stream_count++ == 0)
+		ret = it930x_start_streaming(dev);
+	mutex_unlock(&dev->stream_lock);
+	return ret;
 }
 
 static void it930x_alp_stop(void *priv)
 {
-	it930x_stop_streaming(priv);
+	struct it930x_fe_ctx *ife = priv;
+	struct it930x_dev *dev = ife->dev;
+
+	mutex_lock(&dev->stream_lock);
+	if (--dev->stream_count == 0)
+		it930x_stop_streaming(dev);
+	mutex_unlock(&dev->stream_lock);
 }
 
 /* -------- TS streaming -------- */
+
+/*
+ * Zero-copy TS packet routing for multi-frontend devices.
+ *
+ * URB_BUF_SIZE = 188 * 816 guarantees packets never span URB boundaries.
+ * The IT930x threshold register (0xdd88) ensures complete multiples of 188.
+ *
+ * For multi-frontend: each packet has a modified sync byte encoding the
+ * port ID. Pattern: (sync & 0x8f) == 0x07, fe_idx = ((sync >> 4) & 7) - 1.
+ * We restore 0x47 in-place — safe because the DMA buffer is overwritten
+ * on the next USB transfer.
+ */
+static void it930x_ts_route(struct it930x_dev *dev, u8 *buf, u32 len)
+{
+	u32 pos;
+
+	/* Fast path: single frontend, standard 0x47 sync */
+	if (dev->board->num_frontends == 1) {
+		dvb_dmx_swfilter(&dev->fes[0].demux, buf, len);
+		atsc3_alp_feed(&dev->fes[0].alp, buf, len);
+		return;
+	}
+
+	/* Multi-frontend routing */
+	for (pos = 0; pos + 188 <= len; pos += 188) {
+		u8 s = buf[pos];
+		int fe_idx;
+
+		if ((s & 0x8f) != 0x07)
+			continue;
+
+		fe_idx = ((s & 0x70) >> 4) - 1;
+		if ((unsigned int)fe_idx >= (unsigned int)dev->board->num_frontends)
+			continue;
+
+		buf[pos] = 0x47;
+		dvb_dmx_swfilter(&dev->fes[fe_idx].demux, buf + pos, 188);
+	}
+}
 
 static void it930x_urb_complete(struct urb *urb)
 {
@@ -1211,12 +1530,8 @@ static void it930x_urb_complete(struct urb *urb)
 	switch (urb->status) {
 	case 0:
 		if (urb->actual_length > 0) {
-			dvb_dmx_swfilter(&dev->demux,
-					 urb->transfer_buffer,
-					 urb->actual_length);
-			atsc3_alp_feed(&dev->alp,
-				       urb->transfer_buffer,
-				       urb->actual_length);
+			it930x_ts_route(dev, urb->transfer_buffer,
+					urb->actual_length);
 			dev->urb_complete_ok++;
 			dev->urb_bytes_total += urb->actual_length;
 		} else {
@@ -1250,8 +1565,6 @@ static int it930x_start_streaming(struct it930x_dev *dev)
 	if (dev->streaming)
 		return 0;
 
-	/* Sync bypass disabled — both ATSC 1.0 (TS) and ATSC 3.0 (ALP_DIV_TS)
-	 * use 0x47 sync bytes.  Enabling bypass breaks ATSC 1.0. */
 	mutex_lock(&dev->io_lock);
 	ret = it930x_write_reg(dev, IT930X_REG_TS_SYNC_BYPASS, 0x00);
 	if (ret) {
@@ -1261,7 +1574,6 @@ static int it930x_start_streaming(struct it930x_dev *dev)
 		return ret;
 	}
 
-	/* Configure TS port — demod must be initialized and tuned first */
 	ret = it930x_stage_ts_port_cfg(dev);
 	mutex_unlock(&dev->io_lock);
 	if (ret) {
@@ -1270,7 +1582,7 @@ static int it930x_start_streaming(struct it930x_dev *dev)
 		return ret;
 	}
 
-	/* Flush stale data from bridge PSB/FIFO */
+	/* Flush stale data from bridge FIFO */
 	usb_bulk_msg(dev->udev,
 		     usb_rcvbulkpipe(dev->udev, IT930X_EP_TS),
 		     dev->urb_bufs[0], IT930X_URB_BUF_SIZE,
@@ -1314,10 +1626,6 @@ static int it930x_start_streaming(struct it930x_dev *dev)
 static void it930x_stop_streaming(struct it930x_dev *dev)
 {
 	int i;
-
-	/* Don't stop if another user still needs streaming */
-	if (dev->feeding > 0)
-		return;
 
 	if (!dev->streaming)
 		return;
@@ -1378,92 +1686,74 @@ static void it930x_free_urbs(struct it930x_dev *dev)
 /* -------- Hardware PID filter -------- */
 
 /*
- * Program a PID into hardware filter slot @idx.
- * Caller must hold dev->io_lock.
+ * PID filter registers are per-port on multi-frontend devices.
+ * Port 0 base addresses are used; for other ports the register set
+ * is offset. Currently only used for single-frontend (port 0).
  */
 static int it930x_pid_filter_set(struct it930x_dev *dev, u8 idx, u16 pid)
 {
 	int ret;
 
-	/* Write match table entry */
-	ret = it930x_write_reg(dev, IT930X_REG_PID_DAT_H,
-			       (pid >> 8) & 0x1f);
+	ret = it930x_write_reg(dev, 0xda17, (pid >> 8) & 0x1f);
 	if (ret)
 		return ret;
-	ret = it930x_write_reg(dev, IT930X_REG_PID_DAT_L, pid & 0xff);
+	ret = it930x_write_reg(dev, 0xda16, pid & 0xff);
 	if (ret)
 		return ret;
-	ret = it930x_write_reg(dev, IT930X_REG_PID_INDEX_EN, 0x01);
+	ret = it930x_write_reg(dev, 0xda14, 0x01);
 	if (ret)
 		return ret;
-	ret = it930x_write_reg(dev, IT930X_REG_PID_INDEX, idx);
+	ret = it930x_write_reg(dev, 0xda15, idx);
 	if (ret)
 		return ret;
 
-	/* Write remap table entry (same PID — no remapping) */
-	ret = it930x_write_reg(dev, IT930X_REG_PID_DAT_H,
-			       (pid >> 8) & 0x1f);
+	ret = it930x_write_reg(dev, 0xda17, (pid >> 8) & 0x1f);
 	if (ret)
 		return ret;
-	ret = it930x_write_reg(dev, IT930X_REG_PID_DAT_L, pid & 0xff);
+	ret = it930x_write_reg(dev, 0xda16, pid & 0xff);
 	if (ret)
 		return ret;
-	return it930x_write_reg(dev, IT930X_REG_MAP_INDEX, idx);
+	return it930x_write_reg(dev, 0xda11, idx);
 }
 
-/*
- * Disable hardware filter slot @idx.
- * Caller must hold dev->io_lock.
- */
 static int it930x_pid_filter_clear(struct it930x_dev *dev, u8 idx)
 {
 	int ret;
 
-	ret = it930x_write_reg(dev, IT930X_REG_PID_INDEX_EN, 0x00);
+	ret = it930x_write_reg(dev, 0xda14, 0x00);
 	if (ret)
 		return ret;
-	return it930x_write_reg(dev, IT930X_REG_PID_INDEX, idx);
+	return it930x_write_reg(dev, 0xda15, idx);
 }
 
-/*
- * Enable or disable the hardware PID filter engine.
- * on=true:  purge stale entries, set remap_mode=PASS, enable filter.
- * on=false: disable filter (pass all TS through).
- * Caller must hold dev->io_lock.
- */
-static int it930x_pid_filter_ctrl(struct it930x_dev *dev, bool on)
+static int it930x_pid_filter_ctrl(struct it930x_fe_ctx *ife, bool on)
 {
+	struct it930x_dev *dev = ife->dev;
 	int ret, i;
 
 	if (on) {
-		/* Clear all 64 slots to remove stale entries */
 		for (i = 0; i < IT930X_PID_FILTER_MAX; i++) {
 			ret = it930x_pid_filter_clear(dev, i);
 			if (ret)
 				return ret;
 		}
-		/* Whitelist mode, no PID remapping, zero offset */
-		ret = it930x_write_reg(dev, IT930X_REG_REMAP_MODE, 0x00);
+		ret = it930x_write_reg(dev, 0xda13, 0x00);
 		if (ret)
 			return ret;
-		ret = it930x_write_reg(dev, IT930X_REG_PID_OFFSET_L, 0x00);
+		ret = it930x_write_reg(dev, 0xda81, 0x00);
 		if (ret)
 			return ret;
-		ret = it930x_write_reg(dev, IT930X_REG_PID_OFFSET_H, 0x00);
+		ret = it930x_write_reg(dev, 0xda82, 0x00);
 		if (ret)
 			return ret;
-		/* Activate PID filter engine */
-		ret = it930x_write_reg(dev, IT930X_REG_AGGRE_MODE, 0x03);
+		ret = it930x_write_reg(dev, 0xda73, 0x03);
 		if (ret)
 			return ret;
-		dev->hw_pid_active = true;
 		dev_info(&dev->intf->dev, "PID filter: engine enabled\n");
 	} else {
-		/* Pass all TS — disable filter engine */
-		ret = it930x_write_reg(dev, IT930X_REG_AGGRE_MODE, 0x00);
+		ret = it930x_write_reg(dev, 0xda73, 0x00);
 		if (ret)
 			return ret;
-		dev->hw_pid_active = false;
 		dev_info(&dev->intf->dev, "PID filter: engine disabled\n");
 	}
 	return 0;
@@ -1473,114 +1763,113 @@ static int it930x_pid_filter_ctrl(struct it930x_dev *dev, bool on)
 
 static int it930x_start_feed(struct dvb_demux_feed *feed)
 {
-	struct it930x_dev *dev = feed->demux->priv;
-	bool first = (dev->feeding == 0);
+	struct it930x_fe_ctx *ife = feed->demux->priv;
+	struct it930x_dev *dev = ife->dev;
 	int ret;
 
-	dev->feeding++;
+	ife->feeding++;
 
-	if (first) {
-		ret = it930x_start_streaming(dev);
-		if (ret) {
-			dev->feeding--;
-			return ret;
+	if (ife->feeding == 1) {
+		mutex_lock(&dev->stream_lock);
+		if (dev->stream_count++ == 0) {
+			ret = it930x_start_streaming(dev);
+			if (ret) {
+				dev->stream_count--;
+				mutex_unlock(&dev->stream_lock);
+				ife->feeding--;
+				return ret;
+			}
 		}
+		mutex_unlock(&dev->stream_lock);
 	}
 
-	/* PID 0x2000 = pass-all: disable HW filter. */
-	if (feed->pid == 0x2000) {
-		if (dev->hw_pid_active) {
-			mutex_lock(&dev->io_lock);
-			it930x_pid_filter_ctrl(dev, false);
-			mutex_unlock(&dev->io_lock);
-		}
-		return 0;
-	}
-
-	mutex_lock(&dev->io_lock);
-
-	if (!dev->hw_pid_active) {
-		ret = it930x_pid_filter_ctrl(dev, true);
-		if (ret) {
-			mutex_unlock(&dev->io_lock);
-			dev_warn(&dev->intf->dev,
-				 "HW PID filter enable failed (%d), using SW\n",
-				 ret);
-			return 0; /* fallback to software filtering */
-		}
-	}
-
-	ret = it930x_pid_filter_set(dev, feed->index, feed->pid);
-	if (ret) {
-		dev_warn(&dev->intf->dev,
-			 "HW PID set idx=%u pid=0x%04x failed (%d)\n",
-			 feed->index, feed->pid, ret);
-		/* Disable HW filter — fall back to software */
-		it930x_pid_filter_ctrl(dev, false);
-	} else {
-		dev_info(&dev->intf->dev,
-			 "PID filter: add pid=0x%04x slot=%u\n",
-			 feed->pid, feed->index);
-	}
-
-	mutex_unlock(&dev->io_lock);
 	return 0;
 }
 
 static int it930x_stop_feed(struct dvb_demux_feed *feed)
 {
-	struct it930x_dev *dev = feed->demux->priv;
+	struct it930x_fe_ctx *ife = feed->demux->priv;
+	struct it930x_dev *dev = ife->dev;
 
-	if (dev->hw_pid_active && feed->pid != 0x2000) {
-		mutex_lock(&dev->io_lock);
-		it930x_pid_filter_clear(dev, feed->index);
-		mutex_unlock(&dev->io_lock);
-		dev_info(&dev->intf->dev,
-			 "PID filter: remove pid=0x%04x slot=%u\n",
-			 feed->pid, feed->index);
-	}
-
-	if (--dev->feeding == 0) {
-		if (dev->hw_pid_active) {
-			mutex_lock(&dev->io_lock);
-			it930x_pid_filter_ctrl(dev, false);
-			mutex_unlock(&dev->io_lock);
-		}
-		it930x_stop_streaming(dev);
+	if (--ife->feeding == 0) {
+		mutex_lock(&dev->stream_lock);
+		if (--dev->stream_count == 0)
+			it930x_stop_streaming(dev);
+		mutex_unlock(&dev->stream_lock);
 	}
 
 	return 0;
 }
 
+/* -------- LNB power control -------- */
+
+static int it930x_set_lnb(struct i2c_adapter *i2c, int on)
+{
+	struct it930x_i2c_ctx *ctx = i2c_get_adapdata(i2c);
+	struct it930x_dev *dev = ctx->dev;
+	int ret = 0;
+
+	if (!dev->board->gpio_lnb)
+		return 0;
+
+	mutex_lock(&dev->lnb_lock);
+	if (on) {
+		if (dev->lnb_count++ == 0) {
+			mutex_lock(&dev->io_lock);
+			ret = it930x_gpio_set(dev, dev->board->gpio_lnb, true);
+			mutex_unlock(&dev->io_lock);
+		}
+	} else {
+		if (--dev->lnb_count <= 0) {
+			dev->lnb_count = 0;
+			mutex_lock(&dev->io_lock);
+			ret = it930x_gpio_set(dev, dev->board->gpio_lnb, false);
+			mutex_unlock(&dev->io_lock);
+		}
+	}
+	mutex_unlock(&dev->lnb_lock);
+	return ret;
+}
+
 /* -------- Frontend attach -------- */
 
-static struct cxd2878_config it930x_cxd2878_cfg = {
-	.addr_slvt = 0x6c,
-	.xtal = SONY_DEMOD_XTAL_24000KHz,
-	.tuner_addr = 0x60,
-	.tuner_xtal = SONY_ASCOT3_XTAL_24000KHz,
-	.ts_mode = 0,
-	.ts_ser_data = 0,
-	.ts_clk = 1,
-	.ts_clk_mask = 1,
-	.ts_valid = 0,
-	.atscCoreDisable = 0,
-	.lock_flag = 1,
-	.write_properties = NULL,
-	.read_properties = NULL,
-};
-
-static int it930x_frontend_attach(struct it930x_dev *dev)
+static int it930x_frontend_attach(struct it930x_fe_ctx *ife)
 {
-	dev->fe = dvb_attach(cxd2878_attach, &it930x_cxd2878_cfg, &dev->i2c);
-	if (!dev->fe) {
-		dev_err(&dev->intf->dev, "cxd2878 attach failed\n");
+	struct it930x_dev *dev = ife->dev;
+	const struct it930x_board_cfg *board = dev->board;
+	const struct it930x_fe_cfg *fc = &board->fe[ife->idx];
+	struct cxd2878_config *cfg = &ife->demod_cfg;
+
+	memset(cfg, 0, sizeof(*cfg));
+	cfg->addr_slvt	= fc->demod_addr;
+	cfg->xtal	= SONY_DEMOD_XTAL_24000KHz;
+	cfg->tuner_addr	= fc->tuner_addr;
+	cfg->ts_clk	= 1;
+	cfg->ts_clk_mask = 1;
+	cfg->lock_flag	= 1;
+
+	if (board->gpio_lnb) {
+		/* PX-MLT boards: CXD2856 + HELENE (CXD2858ER) at 16MHz */
+		cfg->tuner_xtal = SONY_ASCOT3_XTAL_16000KHz;
+		cfg->set_lnb	= it930x_set_lnb;
+		cfg->fe_sat	= &ife->fe_sat;
+	} else {
+		/* Geniatech: CXD2878 + integrated Ascot3 at 24MHz */
+		cfg->tuner_xtal = SONY_ASCOT3_XTAL_24000KHz;
+	}
+
+	ife->fe = dvb_attach(cxd2878_attach, cfg, ife->i2c);
+	if (!ife->fe) {
+		dev_err(&dev->intf->dev,
+			"cxd2878 attach failed for frontend %d\n", ife->idx);
 		return -ENODEV;
 	}
 
-	if (dev->devname)
-		strscpy(dev->fe->ops.info.name, dev->devname,
-			sizeof(dev->fe->ops.info.name));
+	strscpy(ife->fe->ops.info.name, board->name,
+		sizeof(ife->fe->ops.info.name));
+	if (ife->fe_sat)
+		strscpy(ife->fe_sat->ops.info.name, board->name,
+			sizeof(ife->fe_sat->ops.info.name));
 
 	return 0;
 }
@@ -1589,88 +1878,173 @@ static int it930x_frontend_attach(struct it930x_dev *dev)
 
 static int it930x_dvb_init(struct it930x_dev *dev)
 {
-	int ret;
+	const struct it930x_board_cfg *board = dev->board;
+	int i, ret;
 
-	ret = dvb_register_adapter(&dev->dvb_adapter, "Sony CXD2878",
-				   THIS_MODULE, &dev->intf->dev,
-				   adapter_nr);
-	if (ret < 0) {
-		dev_err(&dev->intf->dev,
-			"dvb_register_adapter failed (%d)\n", ret);
-		return ret;
+	for (i = 0; i < board->num_frontends; i++) {
+		struct it930x_fe_ctx *ife = &dev->fes[i];
+		const struct it930x_fe_cfg *fc = &board->fe[i];
+
+		ife->dev = dev;
+		ife->idx = i;
+		ife->i2c = (fc->i2c_bus == 1) ? &dev->i2c[0] : &dev->i2c[1];
+
+		ret = dvb_register_adapter(&ife->adapter, board->name,
+					   THIS_MODULE, &dev->intf->dev,
+					   adapter_nr);
+		if (ret < 0) {
+			dev_err(&dev->intf->dev,
+				"dvb_register_adapter failed for fe %d (%d)\n",
+				i, ret);
+			goto err_unwind;
+		}
+
+		ret = it930x_frontend_attach(ife);
+		if (ret)
+			goto err_adapter;
+
+		ret = dvb_register_frontend(&ife->adapter, ife->fe);
+		if (ret) {
+			dev_err(&dev->intf->dev,
+				"dvb_register_frontend failed for fe %d (%d)\n",
+				i, ret);
+			dvb_frontend_detach(ife->fe);
+			ife->fe = NULL;
+			goto err_adapter;
+		}
+
+		if (ife->fe_sat) {
+			ret = dvb_register_frontend(&ife->adapter, ife->fe_sat);
+			if (ret) {
+				dev_err(&dev->intf->dev,
+					"dvb_register_frontend (sat) failed for fe %d (%d)\n",
+					i, ret);
+				dvb_frontend_detach(ife->fe_sat);
+				ife->fe_sat = NULL;
+				/* non-fatal: terrestrial still works */
+			}
+		}
+
+		ife->demux.dmx.capabilities =
+			DMX_TS_FILTERING | DMX_SECTION_FILTERING;
+		ife->demux.priv = ife;
+		ife->demux.filternum = 256;
+		ife->demux.feednum = 256;
+		ife->demux.start_feed = it930x_start_feed;
+		ife->demux.stop_feed = it930x_stop_feed;
+		ret = dvb_dmx_init(&ife->demux);
+		if (ret)
+			goto err_frontend;
+
+		ife->dmxdev.filternum = 256;
+		ife->dmxdev.demux = &ife->demux.dmx;
+		ife->dmxdev.capabilities = 0;
+		ret = dvb_dmxdev_init(&ife->dmxdev, &ife->adapter);
+		if (ret)
+			goto err_dmx;
+
+		ret = dvb_net_init(&ife->adapter, &ife->dvbnet,
+				   &ife->demux.dmx);
+		if (ret)
+			goto err_dmxdev;
+
+		/* ATSC 3.0 ALP (non-fatal) */
+		ife->alp.fe = ife->fe;
+		ife->alp.start_streaming = it930x_alp_start;
+		ife->alp.stop_streaming = it930x_alp_stop;
+		ife->alp.priv = ife;
+		atsc3_alp_register_netdev(&ife->alp);
+
+		continue;
+
+	err_dmxdev:
+		dvb_dmxdev_release(&ife->dmxdev);
+	err_dmx:
+		dvb_dmx_release(&ife->demux);
+	err_frontend:
+		if (ife->fe_sat) {
+			dvb_unregister_frontend(ife->fe_sat);
+			dvb_frontend_detach(ife->fe_sat);
+			ife->fe_sat = NULL;
+		}
+		dvb_unregister_frontend(ife->fe);
+		dvb_frontend_detach(ife->fe);
+		ife->fe = NULL;
+	err_adapter:
+		dvb_unregister_adapter(&ife->adapter);
+		goto err_unwind;
 	}
-
-	ret = it930x_frontend_attach(dev);
-	if (ret)
-		goto err_adapter;
-
-	ret = dvb_register_frontend(&dev->dvb_adapter, dev->fe);
-	if (ret) {
-		dev_err(&dev->intf->dev,
-			"dvb_register_frontend failed (%d)\n", ret);
-		dvb_frontend_detach(dev->fe);
-		goto err_adapter;
-	}
-
-	dev->demux.dmx.capabilities = DMX_TS_FILTERING | DMX_SECTION_FILTERING;
-	dev->demux.priv = dev;
-	dev->demux.filternum = IT930X_PID_FILTER_MAX;
-	dev->demux.feednum = IT930X_PID_FILTER_MAX;
-	dev->demux.start_feed = it930x_start_feed;
-	dev->demux.stop_feed = it930x_stop_feed;
-	ret = dvb_dmx_init(&dev->demux);
-	if (ret)
-		goto err_frontend;
-
-	dev->dmxdev.filternum = IT930X_PID_FILTER_MAX;
-	dev->dmxdev.demux = &dev->demux.dmx;
-	dev->dmxdev.capabilities = 0;
-	ret = dvb_dmxdev_init(&dev->dmxdev, &dev->dvb_adapter);
-	if (ret)
-		goto err_dmx;
-
-	ret = dvb_net_init(&dev->dvb_adapter, &dev->dvbnet, &dev->demux.dmx);
-	if (ret)
-		goto err_dmxdev;
 
 	ret = it930x_alloc_urbs(dev);
 	if (ret)
-		goto err_net;
+		goto err_unwind;
 
 	return 0;
 
-err_net:
-	dvb_net_release(&dev->dvbnet);
-err_dmxdev:
-	dvb_dmxdev_release(&dev->dmxdev);
-err_dmx:
-	dvb_dmx_release(&dev->demux);
-err_frontend:
-	dvb_unregister_frontend(dev->fe);
-err_adapter:
-	dvb_unregister_adapter(&dev->dvb_adapter);
+err_unwind:
+	/* Clean up already-registered frontends in reverse */
+	while (--i >= 0) {
+		struct it930x_fe_ctx *ife = &dev->fes[i];
+
+		atsc3_alp_unregister_netdev(&ife->alp);
+		dvb_net_release(&ife->dvbnet);
+		dvb_dmxdev_release(&ife->dmxdev);
+		dvb_dmx_release(&ife->demux);
+		if (ife->fe_sat) {
+			dvb_unregister_frontend(ife->fe_sat);
+			dvb_frontend_detach(ife->fe_sat);
+		}
+		if (ife->fe) {
+			dvb_unregister_frontend(ife->fe);
+			dvb_frontend_detach(ife->fe);
+		}
+		dvb_unregister_adapter(&ife->adapter);
+	}
 	return ret;
 }
 
 static void it930x_dvb_exit(struct it930x_dev *dev)
 {
+	int i;
+
 	it930x_stop_streaming(dev);
 	it930x_free_urbs(dev);
-	dvb_net_release(&dev->dvbnet);
-	dvb_dmxdev_release(&dev->dmxdev);
-	dvb_dmx_release(&dev->demux);
-	if (dev->fe) {
-		dvb_unregister_frontend(dev->fe);
-		dvb_frontend_detach(dev->fe);
+
+	for (i = dev->board->num_frontends - 1; i >= 0; i--) {
+		struct it930x_fe_ctx *ife = &dev->fes[i];
+
+		atsc3_alp_unregister_netdev(&ife->alp);
+		dvb_net_release(&ife->dvbnet);
+		dvb_dmxdev_release(&ife->dmxdev);
+		dvb_dmx_release(&ife->demux);
+		if (ife->fe_sat) {
+			dvb_unregister_frontend(ife->fe_sat);
+			dvb_frontend_detach(ife->fe_sat);
+		}
+		if (ife->fe) {
+			dvb_unregister_frontend(ife->fe);
+			dvb_frontend_detach(ife->fe);
+		}
+		dvb_unregister_adapter(&ife->adapter);
 	}
-	dvb_unregister_adapter(&dev->dvb_adapter);
 }
 
 /* -------- USB probe/disconnect -------- */
 
+static bool board_uses_bus1(const struct it930x_board_cfg *b)
+{
+	int i;
+
+	for (i = 0; i < b->num_frontends; i++)
+		if (b->fe[i].i2c_bus == 1)
+			return true;
+	return false;
+}
+
 static int it930x_probe(struct usb_interface *intf,
 			const struct usb_device_id *id)
 {
+	const struct it930x_board_cfg *board;
 	struct it930x_dev *dev;
 	int ret;
 
@@ -1678,14 +2052,18 @@ static int it930x_probe(struct usb_interface *intf,
 	if (ret)
 		return ret;
 
+	board = &it930x_boards[id->driver_info];
+
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev)
 		return -ENOMEM;
 
 	dev->udev = usb_get_dev(interface_to_usbdev(intf));
 	dev->intf = intf;
-	dev->devname = (const char *)id->driver_info;
+	dev->board = board;
 	mutex_init(&dev->io_lock);
+	mutex_init(&dev->stream_lock);
+	mutex_init(&dev->lnb_lock);
 
 	/* Start transport threads */
 	ret = it930x_transport_start(dev);
@@ -1701,17 +2079,56 @@ static int it930x_probe(struct usb_interface *intf,
 		goto err_transport;
 	}
 
-	/* Register I2C adapter */
-	dev->i2c.owner = THIS_MODULE;
-	dev->i2c.algo = &it930x_i2c_algo;
-	dev->i2c.dev.parent = &intf->dev;
-	strscpy(dev->i2c.name, "it930x-i2c", sizeof(dev->i2c.name));
-	i2c_set_adapdata(&dev->i2c, dev);
+	/* Register I2C adapter for bus 3 (always present) */
+	dev->i2c_ctx[1].dev = dev;
+	dev->i2c_ctx[1].bus_num = 3;
+	dev->i2c[1].owner = THIS_MODULE;
+	dev->i2c[1].algo = &it930x_i2c_algo;
+	dev->i2c[1].dev.parent = &intf->dev;
+	snprintf(dev->i2c[1].name, sizeof(dev->i2c[1].name), "it930x-i2c-3");
+	i2c_set_adapdata(&dev->i2c[1], &dev->i2c_ctx[1]);
 
-	ret = i2c_add_adapter(&dev->i2c);
+	ret = i2c_add_adapter(&dev->i2c[1]);
 	if (ret) {
-		dev_err(&intf->dev, "i2c_add_adapter failed (%d)\n", ret);
+		dev_err(&intf->dev, "i2c_add_adapter bus3 failed (%d)\n", ret);
 		goto err_transport;
+	}
+
+	/* Register I2C adapter for bus 1 (only if needed) */
+	if (board_uses_bus1(board)) {
+		dev->i2c_ctx[0].dev = dev;
+		dev->i2c_ctx[0].bus_num = 1;
+		dev->i2c[0].owner = THIS_MODULE;
+		dev->i2c[0].algo = &it930x_i2c_algo;
+		dev->i2c[0].dev.parent = &intf->dev;
+		snprintf(dev->i2c[0].name, sizeof(dev->i2c[0].name),
+			 "it930x-i2c-1");
+		i2c_set_adapdata(&dev->i2c[0], &dev->i2c_ctx[0]);
+
+		ret = i2c_add_adapter(&dev->i2c[0]);
+		if (ret) {
+			dev_err(&intf->dev,
+				"i2c_add_adapter bus1 failed (%d)\n", ret);
+			goto err_i2c_bus3;
+		}
+	}
+
+	/* Power on backends for PX-MLT boards */
+	if (board->gpio_power) {
+		mutex_lock(&dev->io_lock);
+		ret = it930x_gpio_set(dev, board->gpio_power, false);
+		mutex_unlock(&dev->io_lock);
+		if (ret) {
+			dev_err(&intf->dev, "backend power-on failed (%d)\n",
+				ret);
+			goto err_i2c;
+		}
+		msleep(80);
+
+		mutex_lock(&dev->io_lock);
+		it930x_gpio_pulse(dev, board->gpio_reset);
+		mutex_unlock(&dev->io_lock);
+		msleep(20);
 	}
 
 	/* Initialize DVB subsystem */
@@ -1719,21 +2136,18 @@ static int it930x_probe(struct usb_interface *intf,
 	if (ret)
 		goto err_i2c;
 
-	/* ATSC 3.0 ALP network interface (non-fatal if creation fails) */
-	dev->alp.fe = dev->fe;
-	dev->alp.start_streaming = it930x_alp_start;
-	dev->alp.stop_streaming = it930x_alp_stop;
-	dev->alp.priv = dev;
-	atsc3_alp_register_netdev(&dev->alp);
-
 	usb_set_intfdata(intf, dev);
 
-	dev_info(&intf->dev, "Generic ITE IT930X adapter attached\n");
+	dev_info(&intf->dev, "%s attached (%d frontends)\n",
+		 board->name, board->num_frontends);
 
 	return 0;
 
 err_i2c:
-	i2c_del_adapter(&dev->i2c);
+	if (board_uses_bus1(board))
+		i2c_del_adapter(&dev->i2c[0]);
+err_i2c_bus3:
+	i2c_del_adapter(&dev->i2c[1]);
 err_transport:
 	it930x_transport_stop(dev);
 err_free:
@@ -1749,21 +2163,29 @@ static void it930x_disconnect(struct usb_interface *intf)
 	if (!dev)
 		return;
 
-	atsc3_alp_unregister_netdev(&dev->alp);
-
 	it930x_dvb_exit(dev);
-	i2c_del_adapter(&dev->i2c);
+
+	if (board_uses_bus1(dev->board))
+		i2c_del_adapter(&dev->i2c[0]);
+	i2c_del_adapter(&dev->i2c[1]);
+
 	it930x_transport_stop(dev);
 	usb_put_dev(dev->udev);
 	kfree(dev);
 
-	dev_info(&intf->dev, "Generic ITE IT930X DVB adapter detached\n");
+	dev_info(&intf->dev, "IT930x adapter detached\n");
 }
 
+/* -------- USB device ID table -------- */
+
 static const struct usb_device_id it930x_id_table[] = {
-	{ USB_DEVICE(0x23e2, 0x2b02),
-	  .driver_info = (unsigned long)"Geniatech HDTV Mate DVB-T/T2/C/C2,ISDB-T/C,ATSC,J83B" },
-	{}
+	{ USB_DEVICE(0x23e2, 0x2b02), .driver_info = 0 },	/* Geniatech HDTV Mate */
+	{ USB_DEVICE(0x0511, 0x084e), .driver_info = 1 },	/* PLEX PX-MLT5U */
+	{ USB_DEVICE(0x0511, 0x024e), .driver_info = 2 },	/* PLEX PX-MLT5PE */
+	{ USB_DEVICE(0x0511, 0x0252), .driver_info = 3 },	/* PLEX PX-MLT8PE3 */
+	{ USB_DEVICE(0x0511, 0x0253), .driver_info = 4 },	/* PLEX PX-MLT8PE5 */
+	{ USB_DEVICE(0x0511, 0x0254), .driver_info = 5 },	/* Digibest ISDB6014 */
+	{ }
 };
 MODULE_DEVICE_TABLE(usb, it930x_id_table);
 
@@ -1779,7 +2201,6 @@ MODULE_PARM_DESC(adapter_nr, "DVB adapter number(s)");
 
 module_usb_driver(it930x_usb_driver);
 
-MODULE_FIRMWARE(IT9306_FIRMWARE_FILE);
-MODULE_DESCRIPTION("Generic ITE IT930X driver");
+MODULE_DESCRIPTION("ITE IT930x USB bridge driver");
 MODULE_AUTHOR("koreapyj");
 MODULE_LICENSE("GPL");
