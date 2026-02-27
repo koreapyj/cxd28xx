@@ -16,6 +16,9 @@ modules.order
 Module.symvers
 modules.nsdeps
 
+# PC/SC IFD handler build artifacts
+pcsc/*.so
+
 # Editor / IDE
 *.swp
 *.swo

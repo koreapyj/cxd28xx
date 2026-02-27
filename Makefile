@@ -6,9 +6,19 @@ ccflags-y += -I$(src) -DCONFIG_DVB_CXD2878=1
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	@if pkg-config --exists libpcsclite 2>/dev/null; then \
+		$(MAKE) -C pcsc; \
+	fi
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	$(MAKE) -C pcsc clean
 
 install:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
+	@if pkg-config --exists libpcsclite 2>/dev/null; then \
+		$(MAKE) -C pcsc install; \
+	fi
+
+uninstall:
+	$(MAKE) -C pcsc uninstall

@@ -14,6 +14,7 @@
 #include <linux/completion.h>
 #include <linux/firmware.h>
 #include <linux/delay.h>
+#include <linux/miscdevice.h>
 #include <media/dvb_frontend.h>
 #include <media/dmxdev.h>
 #include <media/dvb_demux.h>
@@ -21,6 +22,7 @@
 
 #include "cxd2878.h"
 #include "atsc3_alp.h"
+#include "it930x_smartcard.h"
 
 /* -------- IT930x bridge constants -------- */
 
@@ -32,6 +34,9 @@
 #define IT930X_CMD_FW_SCATTER_WRITE	0x0029
 #define IT930X_CMD_GENERIC_I2C_RD	0x002a
 #define IT930X_CMD_GENERIC_I2C_WR	0x002b
+#define IT930X_CMD_UART_READ		0x0033
+#define IT930X_CMD_UART_WRITE		0x0034
+#define IT930X_CMD_UART_CTRL		0x0035
 
 /* USB endpoints */
 #define IT930X_EP_CMD_OUT		0x02
@@ -74,6 +79,20 @@
 #define IT930X_REG_TS_OUT_CFG2		0xd832
 
 #define IT930X_PID_FILTER_MAX		64
+
+/* Smartcard / UART registers */
+#define IT930X_SC_UART_READY		0x496A
+#define IT930X_SC_UART_RXCOUNT		0x496B
+#define IT930X_SC_UART_MODE		0x7904
+#define IT930X_SC_UART_ENABLE		0x4965	/* Type 2 TX enable */
+#define IT930X_SC_BOARD_TYPE_REG		0x49E8
+
+#define IT930X_SC_GPIO_DETECT		6	/* GPIOH6 - card detect (active low) */
+#define IT930X_SC_GPIO_TXEN		3	/* GPIOH3 - TX enable, Type 1 */
+#define IT930X_SC_UART_WR_CHUNK		48
+#define IT930X_SC_UART_RD_CHUNK		32
+#define IT930X_SC_POLL_COUNT		50
+#define IT930X_SC_POLL_MS		10
 
 /* -------- GPIO register table -------- */
 
@@ -132,6 +151,7 @@ struct it930x_board_cfg {
 	u8			f41a_val;	/* 0x05=DVB, 0x01=ISDB-T */
 	u8			i2c_notify;	/* override 0x4975 value, 0=use demod_addr<<1 */
 	enum sony_ascot3_xtal_t	tuner_xtal;
+	u8			gpio_sc_reset;	/* smartcard reset GPIO, 0=no smartcard */
 };
 
 /* -------- Data structures -------- */
@@ -219,9 +239,18 @@ struct it930x_dev {
 	unsigned long urb_complete_err;
 	unsigned long urb_complete_empty;
 	u64 urb_bytes_total;
+
+	/* Smartcard reader */
+	int sc_uart_type;		/* 0=none, 1=GPIO TX, 2=firmware */
+	struct mutex sc_lock;
+	struct miscdevice sc_misc;
+	char sc_name[32];
+	u8 sc_atr[IT930X_SC_MAX_ATR];
+	int sc_atr_len;
 };
 
 static short adapter_nr[] = { [0 ... 19] = -1 };
+static atomic_t sc_counter = ATOMIC_INIT(0);
 
 /* -------- Checksum -------- */
 
@@ -639,6 +668,36 @@ static int it930x_gpio_set(struct it930x_dev *dev, u8 gpio, bool val)
 	if (ret)
 		return ret;
 	return it930x_write_reg(dev, g->val, val ? 0x01 : 0x00);
+}
+
+/*
+ * Read a GPIO input value.
+ * Input register is at val_reg - 1 (separate from output register).
+ * Caller must hold dev->io_lock.
+ */
+static int it930x_gpio_read(struct it930x_dev *dev, u8 gpio, bool *val)
+{
+	const struct it930x_gpio_regs *g;
+	u8 v;
+	int ret;
+
+	if (gpio < 1 || gpio > 16)
+		return -EINVAL;
+
+	g = &it930x_gpio[gpio - 1];
+
+	ret = it930x_write_reg(dev, g->on, 0x01);	/* enable */
+	if (ret)
+		return ret;
+	ret = it930x_write_reg(dev, g->en, 0x00);	/* direction = input */
+	if (ret)
+		return ret;
+	ret = it930x_read_reg(dev, g->val - 1, &v);	/* input register */
+	if (ret)
+		return ret;
+
+	*val = !!v;
+	return 0;
 }
 
 /*
@@ -1712,6 +1771,438 @@ static int it930x_set_lnb(struct i2c_adapter *i2c, int on)
 	return ret;
 }
 
+/* -------- Smartcard reader -------- */
+
+/*
+ * UART command wrappers.
+ * These use the same payload format as register read/write
+ * (len, processor, addr32, data) but with UART command IDs.
+ * Caller must hold dev->io_lock.
+ */
+static int it930x_uart_ctrl(struct it930x_dev *dev, u32 addr,
+			    const u8 *data, u8 len)
+{
+	u8 payload[6 + 250];
+
+	if (len > 250)
+		return -E2BIG;
+
+	payload[0] = len;
+	payload[1] = 2;
+	payload[2] = (addr >> 24) & 0xff;
+	payload[3] = (addr >> 16) & 0xff;
+	payload[4] = (addr >> 8) & 0xff;
+	payload[5] = addr & 0xff;
+	if (len)
+		memcpy(&payload[6], data, len);
+
+	return it930x_cmd_submit_sync(dev, IT930X_CMD_UART_CTRL,
+				      payload, 6 + len, NULL, 0);
+}
+
+static int it930x_uart_write(struct it930x_dev *dev, const u8 *data, u8 len)
+{
+	u8 payload[6 + 250];
+
+	if (len > IT930X_SC_UART_WR_CHUNK)
+		return -E2BIG;
+
+	payload[0] = len;
+	payload[1] = 2;
+	payload[2] = 0;
+	payload[3] = 0;
+	payload[4] = 0;
+	payload[5] = 0;
+	memcpy(&payload[6], data, len);
+
+	return it930x_cmd_submit_sync(dev, IT930X_CMD_UART_WRITE,
+				      payload, 6 + len, NULL, 0);
+}
+
+static int it930x_uart_read(struct it930x_dev *dev, u8 *data, u8 len)
+{
+	u8 payload[6];
+
+	if (len > IT930X_SC_UART_RD_CHUNK)
+		return -E2BIG;
+
+	payload[0] = len;
+	payload[1] = 2;
+	payload[2] = 0;
+	payload[3] = 0;
+	payload[4] = 0;
+	payload[5] = 0;
+
+	return it930x_cmd_submit_sync(dev, IT930X_CMD_UART_READ,
+				      payload, sizeof(payload), data, len);
+}
+
+/* Poll UART ready register. Caller must hold dev->io_lock. */
+static int it930x_uart_wait_ready(struct it930x_dev *dev)
+{
+	u8 val;
+	int i, ret;
+
+	for (i = 0; i < IT930X_SC_POLL_COUNT; i++) {
+		ret = it930x_read_reg(dev, IT930X_SC_UART_READY, &val);
+		if (ret)
+			return ret;
+		if (val)
+			return 0;
+		mutex_unlock(&dev->io_lock);
+		msleep(IT930X_SC_POLL_MS);
+		mutex_lock(&dev->io_lock);
+	}
+	return -ETIMEDOUT;
+}
+
+/*
+ * Detect UART type from board type register (0x49E8).
+ * 0x30 → type 2 (firmware-managed), 0x31 → disabled,
+ * 0x50/0x51/other → type 1 (GPIO TX enable).
+ * Caller must hold dev->io_lock.
+ */
+static int it930x_sc_detect_type(struct it930x_dev *dev)
+{
+	u8 val;
+	int ret;
+
+	ret = it930x_read_reg(dev, IT930X_SC_BOARD_TYPE_REG, &val);
+	if (ret) {
+		dev_dbg(&dev->intf->dev,
+			"sc: board type reg read failed (%d)\n", ret);
+		return 0;
+	}
+
+	dev_dbg(&dev->intf->dev, "sc: board type = 0x%02x\n", val);
+
+	switch (val) {
+	case 0x30:
+		return 2; /* firmware-managed UART */
+	case 0x31:
+		return 0; /* no smartcard */
+	default:
+		return 1; /* GPIO TX enable */
+	}
+}
+
+/* Check if smartcard is inserted. Returns 1=present, 0=absent, <0=error. */
+static int it930x_sc_card_detect(struct it930x_dev *dev)
+{
+	bool gpio_val;
+	int ret;
+
+	mutex_lock(&dev->io_lock);
+	ret = it930x_gpio_read(dev, IT930X_SC_GPIO_DETECT, &gpio_val);
+	mutex_unlock(&dev->io_lock);
+	if (ret)
+		return ret;
+
+	return !gpio_val; /* active low: 0 = card present */
+}
+
+/* Reset smartcard and read ATR. Returns 0 on success. */
+static int it930x_sc_reset(struct it930x_dev *dev)
+{
+	u8 ctrl_data = 0x01;
+	u8 count;
+	int ret;
+
+	mutex_lock(&dev->io_lock);
+
+	/* Assert reset: GPIO low */
+	ret = it930x_gpio_set(dev, dev->board->gpio_sc_reset, false);
+	if (ret)
+		goto out;
+
+	/* Set UART mode */
+	ret = it930x_write_reg(dev, IT930X_SC_UART_MODE, 0x02);
+	if (ret)
+		goto out;
+
+	/* UART ctrl reset command */
+	ret = it930x_uart_ctrl(dev, 0x35, &ctrl_data, 1);
+	if (ret)
+		goto out;
+
+	mutex_unlock(&dev->io_lock);
+	msleep(5);
+	mutex_lock(&dev->io_lock);
+
+	/* De-assert reset: GPIO high, then release to input */
+	ret = it930x_gpio_set(dev, dev->board->gpio_sc_reset, true);
+	if (ret)
+		goto out;
+	ret = it930x_write_reg(dev,
+		it930x_gpio[dev->board->gpio_sc_reset - 1].en, 0x00);
+	if (ret)
+		goto out;
+
+	/* Wait for card response */
+	ret = it930x_uart_wait_ready(dev);
+	if (ret)
+		goto out;
+
+	/* Read ATR */
+	ret = it930x_read_reg(dev, IT930X_SC_UART_RXCOUNT, &count);
+	if (ret)
+		goto out;
+	if (count > IT930X_SC_MAX_ATR)
+		count = IT930X_SC_MAX_ATR;
+	if (count == 0) {
+		ret = -EIO;
+		goto out;
+	}
+
+	ret = it930x_uart_read(dev, dev->sc_atr, count);
+	if (!ret)
+		dev->sc_atr_len = count;
+
+out:
+	mutex_unlock(&dev->io_lock);
+	return ret;
+}
+
+/* Send data to smartcard via UART. */
+static int it930x_sc_send(struct it930x_dev *dev, const u8 *data, int len)
+{
+	int offset = 0;
+	int chunk;
+	int ret;
+
+	mutex_lock(&dev->io_lock);
+
+	/* TX enable */
+	if (dev->sc_uart_type == 1) {
+		ret = it930x_gpio_set(dev, IT930X_SC_GPIO_TXEN, true);
+		if (ret)
+			goto out;
+	} else {
+		ret = it930x_write_reg(dev, IT930X_SC_UART_ENABLE, 0x01);
+		if (ret)
+			goto out;
+	}
+
+	/* Send in chunks */
+	while (offset < len) {
+		chunk = min(len - offset, IT930X_SC_UART_WR_CHUNK);
+		ret = it930x_uart_write(dev, data + offset, chunk);
+		if (ret)
+			goto tx_disable;
+		offset += chunk;
+	}
+
+tx_disable:
+	/* TX disable (Type 1 only) */
+	if (dev->sc_uart_type == 1)
+		it930x_gpio_set(dev, IT930X_SC_GPIO_TXEN, false);
+
+	if (ret)
+		goto out;
+
+	/* Wait for card response */
+	ret = it930x_uart_wait_ready(dev);
+
+out:
+	mutex_unlock(&dev->io_lock);
+	return ret;
+}
+
+/* Receive data from smartcard UART. Returns bytes read in *len. */
+static int it930x_sc_recv(struct it930x_dev *dev, u8 *data, int *len)
+{
+	u8 count;
+	int total = 0;
+	int chunk;
+	int ret;
+
+	mutex_lock(&dev->io_lock);
+
+	ret = it930x_read_reg(dev, IT930X_SC_UART_RXCOUNT, &count);
+	if (ret)
+		goto out;
+
+	while (count > 0) {
+		chunk = min_t(int, count, IT930X_SC_UART_RD_CHUNK);
+		ret = it930x_uart_read(dev, data + total, chunk);
+		if (ret)
+			goto out;
+		total += chunk;
+		count -= chunk;
+	}
+
+	*len = total;
+
+out:
+	mutex_unlock(&dev->io_lock);
+	return ret;
+}
+
+/* Set smartcard UART baudrate. */
+static int it930x_sc_set_baudrate(struct it930x_dev *dev, int baudrate)
+{
+	u8 val;
+	int ret;
+
+	switch (baudrate) {
+	case 9600:	val = 0x00; break;
+	case 19200:	val = 0x01; break;
+	case 38400:	val = 0x02; break;
+	case 57600:	val = 0xF5; break;
+	case 115200:	val = 0xFA; break;
+	default:	return -EINVAL;
+	}
+
+	mutex_lock(&dev->io_lock);
+
+	ret = it930x_uart_ctrl(dev, 0, &val, 1);
+
+	mutex_unlock(&dev->io_lock);
+	return ret;
+}
+
+/* Initialize smartcard hardware. Called during probe. */
+static int it930x_sc_init_hw(struct it930x_dev *dev)
+{
+	u8 data = 0x01;
+	int ret = 0;
+
+	mutex_lock(&dev->io_lock);
+
+	if (dev->sc_uart_type == 2) {
+		/* BCAS init for Type 2 */
+		ret = it930x_uart_ctrl(dev, 0x37, &data, 1);
+		if (ret)
+			dev_warn(&dev->intf->dev,
+				 "BCAS init failed (%d)\n", ret);
+	}
+
+	mutex_unlock(&dev->io_lock);
+	return ret;
+}
+
+/* Chardev file operations */
+static int it930x_sc_open(struct inode *inode, struct file *file)
+{
+	struct it930x_dev *dev = container_of(file->private_data,
+					      struct it930x_dev, sc_misc);
+	file->private_data = dev;
+	return 0;
+}
+
+static int it930x_sc_release(struct inode *inode, struct file *file)
+{
+	return 0;
+}
+
+static ssize_t it930x_sc_fop_write(struct file *file, const char __user *buf,
+				   size_t count, loff_t *ppos)
+{
+	struct it930x_dev *dev = file->private_data;
+	u8 kbuf[256];
+	int ret;
+
+	if (count == 0 || count > sizeof(kbuf))
+		return -EINVAL;
+
+	if (copy_from_user(kbuf, buf, count))
+		return -EFAULT;
+
+	mutex_lock(&dev->sc_lock);
+	ret = it930x_sc_send(dev, kbuf, count);
+	mutex_unlock(&dev->sc_lock);
+
+	return ret ? ret : count;
+}
+
+static ssize_t it930x_sc_fop_read(struct file *file, char __user *buf,
+				  size_t count, loff_t *ppos)
+{
+	struct it930x_dev *dev = file->private_data;
+	u8 kbuf[256];
+	int len = 0;
+	int ret;
+
+	if (count == 0)
+		return 0;
+	if (count > sizeof(kbuf))
+		count = sizeof(kbuf);
+
+	mutex_lock(&dev->sc_lock);
+	ret = it930x_sc_recv(dev, kbuf, &len);
+	mutex_unlock(&dev->sc_lock);
+
+	if (ret)
+		return ret;
+	if (len == 0)
+		return 0;
+	if (len > count)
+		len = count;
+
+	if (copy_to_user(buf, kbuf, len))
+		return -EFAULT;
+
+	return len;
+}
+
+static long it930x_sc_ioctl(struct file *file, unsigned int cmd,
+			    unsigned long arg)
+{
+	struct it930x_dev *dev = file->private_data;
+	struct it930x_sc_atr atr_data;
+	int present;
+	int ret;
+
+	switch (cmd) {
+	case IT930X_SC_CARD_DETECT:
+		ret = it930x_sc_card_detect(dev);
+		if (ret < 0)
+			return ret;
+		present = ret;
+		if (copy_to_user((void __user *)arg, &present, sizeof(present)))
+			return -EFAULT;
+		return 0;
+
+	case IT930X_SC_RESET:
+		mutex_lock(&dev->sc_lock);
+		ret = it930x_sc_reset(dev);
+		if (!ret) {
+			memcpy(atr_data.atr, dev->sc_atr, dev->sc_atr_len);
+			atr_data.len = dev->sc_atr_len;
+		}
+		mutex_unlock(&dev->sc_lock);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &atr_data, sizeof(atr_data)))
+			return -EFAULT;
+		return 0;
+
+	case IT930X_SC_GET_ATR:
+		mutex_lock(&dev->sc_lock);
+		memcpy(atr_data.atr, dev->sc_atr, dev->sc_atr_len);
+		atr_data.len = dev->sc_atr_len;
+		mutex_unlock(&dev->sc_lock);
+		if (copy_to_user((void __user *)arg, &atr_data, sizeof(atr_data)))
+			return -EFAULT;
+		return 0;
+
+	case IT930X_SC_SET_BAUDRATE:
+		return it930x_sc_set_baudrate(dev, (int)arg);
+
+	default:
+		return -ENOTTY;
+	}
+}
+
+static const struct file_operations it930x_sc_fops = {
+	.owner		= THIS_MODULE,
+	.open		= it930x_sc_open,
+	.release	= it930x_sc_release,
+	.read		= it930x_sc_fop_read,
+	.write		= it930x_sc_fop_write,
+	.unlocked_ioctl	= it930x_sc_ioctl,
+};
+
 /* -------- Frontend attach -------- */
 
 static int it930x_frontend_attach(struct it930x_fe_ctx *ife)
@@ -2014,6 +2505,31 @@ static int it930x_probe(struct usb_interface *intf,
 	if (ret)
 		goto err_i2c;
 
+	/* Initialize smartcard reader if present */
+	if (board->gpio_sc_reset) {
+		mutex_init(&dev->sc_lock);
+		mutex_lock(&dev->io_lock);
+		dev->sc_uart_type = it930x_sc_detect_type(dev);
+		mutex_unlock(&dev->io_lock);
+		if (dev->sc_uart_type) {
+			it930x_sc_init_hw(dev);
+			snprintf(dev->sc_name, sizeof(dev->sc_name),
+				 "it930x_smartcard%d",
+				 atomic_fetch_add(1, &sc_counter));
+			dev->sc_misc.minor = MISC_DYNAMIC_MINOR;
+			dev->sc_misc.name = dev->sc_name;
+			dev->sc_misc.fops = &it930x_sc_fops;
+			dev->sc_misc.parent = &intf->dev;
+			ret = misc_register(&dev->sc_misc);
+			if (ret) {
+				dev_warn(&intf->dev,
+					 "smartcard misc_register failed (%d)\n",
+					 ret);
+				dev->sc_uart_type = 0;
+			}
+		}
+	}
+
 	usb_set_intfdata(intf, dev);
 
 	dev_info(&intf->dev, "%s attached (%d frontends)\n",
@@ -2040,6 +2556,9 @@ static void it930x_disconnect(struct usb_interface *intf)
 
 	if (!dev)
 		return;
+
+	if (dev->sc_uart_type)
+		misc_deregister(&dev->sc_misc);
 
 	it930x_dvb_exit(dev);
 
@@ -2095,6 +2614,7 @@ static const struct usb_device_id it930x_id_table[] = {
 		.gpio_lnb	= 11,
 		.f41a_val	= 0x01,
 		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+		.gpio_sc_reset	= 14,
 	  }
 	},
 	{ USB_DEVICE(0x0511, 0x024e), .driver_info = (kernel_ulong_t)
@@ -2119,6 +2639,7 @@ static const struct usb_device_id it930x_id_table[] = {
 		.gpio_lnb	= 11,
 		.f41a_val	= 0x01,
 		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+		.gpio_sc_reset	= 14,
 	  }
 	},
 	{ USB_DEVICE(0x0511, 0x0252), .driver_info = (kernel_ulong_t)
@@ -2139,6 +2660,7 @@ static const struct usb_device_id it930x_id_table[] = {
 		.gpio_lnb	= 11,
 		.f41a_val	= 0x01,
 		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+		.gpio_sc_reset	= 14,
 	  }
 	},
 	{ USB_DEVICE(0x0511, 0x0253), .driver_info = (kernel_ulong_t)
@@ -2163,6 +2685,7 @@ static const struct usb_device_id it930x_id_table[] = {
 		.gpio_lnb	= 11,
 		.f41a_val	= 0x01,
 		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+		.gpio_sc_reset	= 14,
 	  }
 	},
 	{ USB_DEVICE(0x0511, 0x0254), .driver_info = (kernel_ulong_t)
@@ -2185,6 +2708,7 @@ static const struct usb_device_id it930x_id_table[] = {
 		.gpio_lnb	= 11,
 		.f41a_val	= 0x01,
 		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+		.gpio_sc_reset	= 14,
 	  }
 	},
 	{ }

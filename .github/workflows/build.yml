@@ -22,7 +22,7 @@ jobs:
             install: >-
               apt-get update &&
               DEBIAN_FRONTEND=noninteractive apt-get install -y
-              build-essential linux-headers-generic
+              build-essential linux-headers-generic libpcsclite-dev pkg-config
             kdir_glob: /usr/src/linux-headers-*-generic
 
           - name: Ubuntu 24.04
@@ -30,7 +30,7 @@ jobs:
             install: >-
               apt-get update &&
               DEBIAN_FRONTEND=noninteractive apt-get install -y
-              build-essential linux-headers-generic
+              build-essential linux-headers-generic libpcsclite-dev pkg-config
             kdir_glob: /usr/src/linux-headers-*-generic
 
           - name: Debian 12
@@ -38,17 +38,17 @@ jobs:
             install: >-
               apt-get update &&
               DEBIAN_FRONTEND=noninteractive apt-get install -y
-              build-essential linux-headers-amd64
+              build-essential linux-headers-amd64 libpcsclite-dev pkg-config
             kdir_glob: /usr/src/linux-headers-*-amd64
 
           - name: Fedora 40
             container: fedora:40
-            install: dnf install -y gcc make kernel-devel
+            install: dnf install -y gcc make kernel-devel pcsc-lite-devel pkgconf-pkg-config
             kdir_glob: /usr/src/kernels/*
 
           - name: Fedora 41
             container: fedora:41
-            install: dnf install -y gcc make kernel-devel
+            install: dnf install -y gcc make kernel-devel pcsc-lite-devel pkgconf-pkg-config
             kdir_glob: /usr/src/kernels/*
 
     steps:
@@ -69,6 +69,9 @@ jobs:
             test -f ${m}.ko && echo "OK: ${m}.ko" || { echo "MISSING: ${m}.ko"; exit 1; }
           done
 
+      - name: Build IFD handler
+        run: make -C pcsc
+
   package-deb:
     name: Package (deb)
     runs-on: ubuntu-latest
@@ -81,6 +84,7 @@ jobs:
           PKG="${DKMS_NAME}-dkms_${DKMS_VERSION}_all"
           mkdir -p "${PKG}/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
           cp Makefile dkms.conf *.c *.h LICENSE "${PKG}/usr/src/${DKMS_NAME}-${DKMS_VERSION}/"
+          cp -r pcsc "${PKG}/usr/src/${DKMS_NAME}-${DKMS_VERSION}/"
 
           mkdir -p "${PKG}/DEBIAN"
           cat > "${PKG}/DEBIAN/control" << EOF
@@ -135,7 +139,7 @@ jobs:
           mkdir -p rpmbuild/{SPECS,SOURCES}
           tar czf "rpmbuild/SOURCES/${DKMS_NAME}-${DKMS_VERSION}.tar.gz" \
             --transform "s,^,${DKMS_NAME}-${DKMS_VERSION}/," \
-            Makefile dkms.conf *.c *.h LICENSE
+            Makefile dkms.conf *.c *.h LICENSE pcsc/
 
           cat > rpmbuild/SPECS/${DKMS_NAME}.spec << 'EOF'
           Name:    cxd28xx-dkms

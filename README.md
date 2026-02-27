@@ -56,7 +56,7 @@ sudo dkms remove cxd28xx/1.0 --all
 
 ## Building (manual)
 
-Requires kernel headers for the running kernel.
+Requires kernel headers for the running kernel. Optionally install `libpcsclite-dev` (Debian/Ubuntu) or `pcsc-lite-devel` (Fedora) to also build the smartcard IFD handler.
 
 ```sh
 make
@@ -64,11 +64,33 @@ sudo make install
 sudo depmod -a
 ```
 
+To remove:
+
+```sh
+sudo make uninstall
+```
+
 To build against a specific kernel:
 
 ```sh
 make KDIR=/path/to/kernel/build
 ```
+
+## Smartcard Reader
+
+PX-MLT and Digibest devices have a built-in smartcard reader connected via the IT930x UART interface. The driver creates a character device `/dev/it930x_smartcardN` for each reader automatically.
+
+### PC/SC Integration
+
+If `libpcsclite-dev` (Debian/Ubuntu) or `pcsc-lite-devel` (Fedora) is installed when the DKMS package is built, an IFD handler library (`libifd_it930x.so`) is automatically installed for use with pcscd.
+
+The DKMS install automatically places a reader config at `/etc/reader.conf.d/it930x.conf`. Edit this file to adjust `DEVICENAME` if your device is not `/dev/it930x_smartcard0`. Then restart pcscd:
+
+```sh
+sudo systemctl restart pcscd
+```
+
+Verify with `pcsc_scan`.
 
 ## Firmware
 

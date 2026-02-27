@@ -1,0 +1,4 @@
+FRIENDLYNAME "IT930x B-CAS Reader"
+DEVICENAME   /dev/it930x_smartcard0
+LIBPATH      /usr/lib/pcsc/drivers/serial/libifd_it930x.so
+CHANNELID    0x0001
