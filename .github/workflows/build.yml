@@ -6,7 +6,6 @@ on:
 
 env:
   DKMS_NAME: cxd28xx
-  DKMS_VERSION: "1.0"
 
 jobs:
   build:
@@ -80,12 +79,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set version from tag
+        run: echo "DKMS_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Build deb
         run: |
           PKG="${DKMS_NAME}-dkms_${DKMS_VERSION}_all"
           mkdir -p "${PKG}/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
           cp Makefile dkms.conf *.c *.h LICENSE "${PKG}/usr/src/${DKMS_NAME}-${DKMS_VERSION}/"
           cp -r pcsc "${PKG}/usr/src/${DKMS_NAME}-${DKMS_VERSION}/"
+          sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${DKMS_VERSION}\"/" \
+            "${PKG}/usr/src/${DKMS_NAME}-${DKMS_VERSION}/dkms.conf"
 
           mkdir -p "${PKG}/DEBIAN"
           cat > "${PKG}/DEBIAN/control" << EOF
@@ -99,20 +103,20 @@ jobs:
           EOF
           sed -i 's/^          //' "${PKG}/DEBIAN/control"
 
-          cat > "${PKG}/DEBIAN/postinst" << 'EOF'
+          cat > "${PKG}/DEBIAN/postinst" << EOF
           #!/bin/sh
           set -e
-          dkms add -m cxd28xx -v 1.0 2>/dev/null || true
-          dkms build -m cxd28xx -v 1.0 || true
-          dkms install -m cxd28xx -v 1.0 || true
+          dkms add -m ${DKMS_NAME} -v ${DKMS_VERSION} 2>/dev/null || true
+          dkms build -m ${DKMS_NAME} -v ${DKMS_VERSION} || true
+          dkms install -m ${DKMS_NAME} -v ${DKMS_VERSION} || true
           EOF
           sed -i 's/^          //' "${PKG}/DEBIAN/postinst"
           chmod 755 "${PKG}/DEBIAN/postinst"
 
-          cat > "${PKG}/DEBIAN/prerm" << 'EOF'
+          cat > "${PKG}/DEBIAN/prerm" << EOF
           #!/bin/sh
           set -e
-          dkms remove -m cxd28xx -v 1.0 --all 2>/dev/null || true
+          dkms remove -m ${DKMS_NAME} -v ${DKMS_VERSION} --all 2>/dev/null || true
           EOF
           sed -i 's/^          //' "${PKG}/DEBIAN/prerm"
           chmod 755 "${PKG}/DEBIAN/prerm"
@@ -136,6 +140,9 @@ jobs:
       - name: Install rpm-build
         run: dnf install -y rpm-build
 
+      - name: Set version from tag
+        run: echo "DKMS_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Build rpm
         run: |
           mkdir -p rpmbuild/{SPECS,SOURCES}
@@ -143,13 +150,13 @@ jobs:
             --transform "s,^,${DKMS_NAME}-${DKMS_VERSION}/," \
             Makefile dkms.conf *.c *.h LICENSE pcsc/
 
-          cat > rpmbuild/SPECS/${DKMS_NAME}.spec << 'EOF'
-          Name:    cxd28xx-dkms
-          Version: 1.0
+          cat > rpmbuild/SPECS/${DKMS_NAME}.spec << EOF
+          Name:    ${DKMS_NAME}-dkms
+          Version: ${DKMS_VERSION}
           Release: 1
           Summary: CXD2878 DVB driver (DKMS)
           License: GPL-2.0-or-later
-          Source0: cxd28xx-1.0.tar.gz
+          Source0: ${DKMS_NAME}-${DKMS_VERSION}.tar.gz
           BuildArch: noarch
           Requires: dkms
 
@@ -157,22 +164,23 @@ jobs:
           Out-of-tree Linux kernel driver for the Sony CXD2878 demodulator.
 
           %prep
-          %setup -q -n cxd28xx-1.0
+          %setup -q -n ${DKMS_NAME}-${DKMS_VERSION}
 
           %install
-          mkdir -p %{buildroot}/usr/src/cxd28xx-1.0
-          cp -a * %{buildroot}/usr/src/cxd28xx-1.0/
+          mkdir -p %{buildroot}/usr/src/${DKMS_NAME}-${DKMS_VERSION}
+          sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${DKMS_VERSION}\"/" dkms.conf
+          cp -a * %{buildroot}/usr/src/${DKMS_NAME}-${DKMS_VERSION}/
 
           %post
-          dkms add -m cxd28xx -v 1.0 2>/dev/null || true
-          dkms build -m cxd28xx -v 1.0 || true
-          dkms install -m cxd28xx -v 1.0 || true
+          dkms add -m ${DKMS_NAME} -v ${DKMS_VERSION} 2>/dev/null || true
+          dkms build -m ${DKMS_NAME} -v ${DKMS_VERSION} || true
+          dkms install -m ${DKMS_NAME} -v ${DKMS_VERSION} || true
 
           %preun
-          dkms remove -m cxd28xx -v 1.0 --all 2>/dev/null || true
+          dkms remove -m ${DKMS_NAME} -v ${DKMS_VERSION} --all 2>/dev/null || true
 
           %files
-          /usr/src/cxd28xx-1.0
+          /usr/src/${DKMS_NAME}-${DKMS_VERSION}
           EOF
           sed -i 's/^          //' rpmbuild/SPECS/${DKMS_NAME}.spec
 

@@ -7,7 +7,7 @@ Out-of-tree Linux kernel driver for the **Sony CXD28xx** series demodulator and 
 - DVB-T / DVB-T2
 - DVB-C / DVB-C2
 - DVB-S / DVB-S2
-- ISDB-T / ISDB-S
+- ISDB-T / ISDB-C / ISDB-S
 - ATSC 1.0
 - ATSC 3.0
 - J.83B
@@ -24,9 +24,9 @@ Out-of-tree Linux kernel driver for the **Sony CXD28xx** series demodulator and 
 | Digibest ISDB6014 4TS | ITE IT930x | CXD2856ER | HELENE (CXD2858ER) | 4 (terr/cable + sat) |
 | TurboSight TBS 5530 | Cypress FX2 | CXD2878 + M88RS6060 | Ascot3 + M88RS6060 | 2 (terr/cable + sat) |
 
-PX-MLT and Digibest devices expose two virtual frontends per tuner: one for terrestrial/cable (DVB-T/T2/C, ISDB-T) and one for satellite (DVB-S/S2, ISDB-S) with LNB control via DiSEqC.
+TBS 5530 supports ATSC 3.0, unlike the vendor driver.
 
-The TBS 5530 uses the Montage M88RS6060 for DVB-S/S2/S2X satellite reception.
+PX-MLT series (and ISDB6014) potentially support DVB-T/C/S/S2, unlike other drivers. (Not tested)
 
 ## Modules
 
@@ -38,7 +38,37 @@ The TBS 5530 uses the Montage M88RS6060 for DVB-S/S2/S2X satellite reception.
 | `it930x.ko` | ITE IT930x USB bridge driver |
 | `tbs5530.ko` | TurboSight TBS 5530 USB bridge driver |
 
-## Installation (DKMS)
+## Installation (package)
+
+Pre-built DKMS packages are available on the [GitHub Releases](https://github.com/koreapyj/cxd28xx/releases) page.
+
+### Debian / Ubuntu
+
+```sh
+wget -O /tmp/cxd28xx-dkms.deb https://github.com/koreapyj/cxd28xx/releases/latest/download/cxd28xx-dkms_0.2_all.deb
+sudo dpkg -i /tmp/cxd28xx-dkms.deb
+```
+
+To remove:
+
+```sh
+sudo dpkg -r cxd28xx-dkms
+```
+
+### Fedora / RHEL
+
+```sh
+wget -O /tmp/cxd28xx-dkms.rpm https://github.com/koreapyj/cxd28xx/releases/latest/download/cxd28xx-dkms-0.2-1.noarch.rpm
+sudo dnf install /tmp/cxd28xx-dkms.rpm
+```
+
+To remove:
+
+```sh
+sudo dnf remove cxd28xx-dkms
+```
+
+## Installation (DKMS, from source)
 
 DKMS automatically rebuilds the driver on kernel updates.
 
@@ -106,6 +136,12 @@ For PLEX and Digibest devices, refer [px4_drv](https://github.com/nns779/px4_drv
 
 ## ATSC 3.0
 
+### State
+
+Appears to be functional at supported devices. However, because there is currently no MMT/ROUTE demuxer available to handle the South Korean version of ATSC 3.0, the test environment remains limited.
+
+May work in other regions. More tests are required.
+
 ### Tuning
 
 The Linux DVB API has no `SYS_ATSC3` delivery system, and userspace tools (dvbv5-zap, etc.) do not support it. This driver works around the limitation by overloading `SYS_ATSC`:
@@ -131,9 +167,10 @@ dvbv5-zap -c channels.conf "ATSC3_STATION"
 
 ### ALP network interface
 
-ATSC 3.0 delivers IP data via the ALP (ATSC Link-layer Protocol). When the driver locks an ATSC 3.0 signal, a network interface `atscN` is created. To receive IP traffic:
+ATSC 3.0 delivers IP data via the ALP (ATSC Link-layer Protocol). The driver creates a network interface `atscN` for each adapter at device init. The interface can only be brought up while the frontend is tuned to ATSC 3.0. To receive IP traffic:
 
 ```sh
+dvbv5-zap -c channels.conf "ATSC3_STATION"
 sudo ip link set atsc0 up
 ```
 
