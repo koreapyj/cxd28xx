@@ -136,6 +136,10 @@ The following firmware files are required and should be placed in `/lib/firmware
 
 For PLEX and Digibest devices, refer [px4_drv](https://github.com/nns779/px4_drv) to extract from vendor drivers.
 
+For Zenview HDTV Mate, obtain `liba3_phy_sony.so` by downloading the vendor's Android application and extract apk. Once obtained, use `utils/extract_firmware_hdtvmate.c` to extract the firmware blob from the library.
+
+For TBS 5530, see [tbsdtv/linux_media/wiki](https://github.com/tbsdtv/linux_media/wiki#firmware).
+
 ## ATSC 3.0
 
 ### State
