@@ -1768,7 +1768,7 @@ static const struct usb_device_id it930x_id_table[] = {
 MODULE_DEVICE_TABLE(usb, it930x_id_table);
 
 static struct usb_driver it930x_usb_driver = {
-	.name = "it930x-cxd2878",
+	.name = "it930x",
 	.id_table = it930x_id_table,
 	.probe = it930x_probe,
 	.disconnect = it930x_disconnect,
