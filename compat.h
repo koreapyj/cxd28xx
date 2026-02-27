@@ -14,6 +14,11 @@
 #define SYS_ATSC3 35
 #endif
 
+/* DVB-C2 delivery system (kernel 6.11+) */
+#ifndef SYS_DVBC2
+#define SYS_DVBC2 19
+#endif
+
 /* DVB-S2X FEC rates (kernel 6.2+) */
 #ifndef FEC_2_5
 #define FEC_2_5		12
