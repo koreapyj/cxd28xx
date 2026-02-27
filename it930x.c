@@ -1,8 +1,5 @@
 /*
- * ITE IT930x USB bridge driver for CXD2878/CXD2856 demod + tuner
- *
- * Supports single-frontend (Geniatech HDTV Mate) and multi-frontend
- * (PLEX PX-MLT series, Digibest ISDB6014) devices.
+ * ITE IT930x USB bridge driver for CXD28xx demod + tuner
  *
  * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
  */
@@ -134,123 +131,7 @@ struct it930x_board_cfg {
 	u8			gpio_always_hi;	/* GPIO set high at init, 0=none */
 	u8			f41a_val;	/* 0x05=DVB, 0x01=ISDB-T */
 	u8			i2c_notify;	/* override 0x4975 value, 0=use demod_addr<<1 */
-};
-
-static const struct it930x_board_cfg it930x_boards[] = {
-	[0] = {	/* Geniatech HDTV Mate */
-		.name		= "Geniatech HDTV Mate",
-		.fw_file	= "dvb-usb-it9306-01.fw",
-		.num_frontends	= 1,
-		.fe		= {
-			{ .ts_port = 0, .i2c_bus = 3,
-			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
-		},
-		.gpio_power	= 0,
-		.gpio_reset	= 2,
-		.gpio_lnb	= 0,
-		.gpio_always_hi	= 14,
-		.f41a_val	= 0x05,
-		.i2c_notify	= 0x38,
-	},
-	[1] = {	/* PLEX PX-MLT5U */
-		.name		= "PLEX PX-MLT5U",
-		.fw_file	= "it930x-firmware.bin",
-		.num_frontends	= 5,
-		.fe = {
-			{ .ts_port = 4, .i2c_bus = 3,
-			  .demod_addr = 0x65, .tuner_addr = 0x60 },
-			{ .ts_port = 3, .i2c_bus = 1,
-			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
-			{ .ts_port = 1, .i2c_bus = 1,
-			  .demod_addr = 0x64, .tuner_addr = 0x60 },
-			{ .ts_port = 2, .i2c_bus = 3,
-			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
-			{ .ts_port = 0, .i2c_bus = 3,
-			  .demod_addr = 0x64, .tuner_addr = 0x60 },
-		},
-		.gpio_power	= 7,
-		.gpio_reset	= 2,
-		.gpio_lnb	= 11,
-		.f41a_val	= 0x01,
-	},
-	[2] = {	/* PLEX PX-MLT5PE */
-		.name		= "PLEX PX-MLT5PE",
-		.fw_file	= "it930x-firmware.bin",
-		.num_frontends	= 5,
-		.fe = {
-			{ .ts_port = 0, .i2c_bus = 3,
-			  .demod_addr = 0x65, .tuner_addr = 0x60 },
-			{ .ts_port = 1, .i2c_bus = 1,
-			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
-			{ .ts_port = 2, .i2c_bus = 1,
-			  .demod_addr = 0x64, .tuner_addr = 0x60 },
-			{ .ts_port = 3, .i2c_bus = 3,
-			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
-			{ .ts_port = 4, .i2c_bus = 3,
-			  .demod_addr = 0x64, .tuner_addr = 0x60 },
-		},
-		.gpio_power	= 7,
-		.gpio_reset	= 2,
-		.gpio_lnb	= 11,
-		.f41a_val	= 0x01,
-	},
-	[3] = {	/* PLEX PX-MLT8PE3 */
-		.name		= "PLEX PX-MLT8PE3",
-		.fw_file	= "it930x-firmware.bin",
-		.num_frontends	= 3,
-		.fe = {
-			{ .ts_port = 0, .i2c_bus = 3,
-			  .demod_addr = 0x65, .tuner_addr = 0x60 },
-			{ .ts_port = 3, .i2c_bus = 3,
-			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
-			{ .ts_port = 4, .i2c_bus = 3,
-			  .demod_addr = 0x64, .tuner_addr = 0x60 },
-		},
-		.gpio_power	= 7,
-		.gpio_reset	= 2,
-		.gpio_lnb	= 11,
-		.f41a_val	= 0x01,
-	},
-	[4] = {	/* PLEX PX-MLT8PE5 */
-		.name		= "PLEX PX-MLT8PE5",
-		.fw_file	= "it930x-firmware.bin",
-		.num_frontends	= 5,
-		.fe = {
-			{ .ts_port = 0, .i2c_bus = 1,
-			  .demod_addr = 0x65, .tuner_addr = 0x60 },
-			{ .ts_port = 1, .i2c_bus = 1,
-			  .demod_addr = 0x64, .tuner_addr = 0x60 },
-			{ .ts_port = 2, .i2c_bus = 1,
-			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
-			{ .ts_port = 3, .i2c_bus = 3,
-			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
-			{ .ts_port = 4, .i2c_bus = 3,
-			  .demod_addr = 0x64, .tuner_addr = 0x60 },
-		},
-		.gpio_power	= 7,
-		.gpio_reset	= 2,
-		.gpio_lnb	= 11,
-		.f41a_val	= 0x01,
-	},
-	[5] = {	/* Digibest ISDB6014 4TS */
-		.name		= "Digibest ISDB6014 4TS",
-		.fw_file	= "it930x-firmware.bin",
-		.num_frontends	= 4,
-		.fe = {
-			{ .ts_port = 0, .i2c_bus = 3,
-			  .demod_addr = 0x65, .tuner_addr = 0x60 },
-			{ .ts_port = 1, .i2c_bus = 1,
-			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
-			{ .ts_port = 2, .i2c_bus = 1,
-			  .demod_addr = 0x64, .tuner_addr = 0x60 },
-			{ .ts_port = 4, .i2c_bus = 3,
-			  .demod_addr = 0x64, .tuner_addr = 0x60 },
-		},
-		.gpio_power	= 7,
-		.gpio_reset	= 2,
-		.gpio_lnb	= 11,
-		.f41a_val	= 0x01,
-	},
+	enum sony_ascot3_xtal_t	tuner_xtal;
 };
 
 /* -------- Data structures -------- */
@@ -1110,7 +991,7 @@ static int it930x_stage_pre_init(struct it930x_dev *dev)
 	if (ret)
 		return ret;
 
-	/* GPIO always-high (Geniatech: GPIO14 for power rail) */
+	/* GPIO always-high (23e2:2b02: GPIO14 for power rail) */
 	if (board->gpio_always_hi) {
 		ret = it930x_gpio_set(dev, board->gpio_always_hi, true);
 		if (ret)
@@ -1315,7 +1196,7 @@ static int it930x_stage_post_boot(struct it930x_dev *dev)
 			return ret;
 	}
 
-	/* GPIO11 output high (Geniatech I2C bus enable / PX-MLT LNB off) */
+	/* GPIO11 output high (23e2:2b02 I2C bus enable / PX-MLT LNB off) */
 	ret = it930x_gpio_set(dev, 11, true);
 	if (ret)
 		return ret;
@@ -1848,14 +1729,11 @@ static int it930x_frontend_attach(struct it930x_fe_ctx *ife)
 	cfg->ts_clk_mask = 1;
 	cfg->lock_flag	= 1;
 
+	cfg->tuner_xtal = board->tuner_xtal;
+
 	if (board->gpio_lnb) {
-		/* PX-MLT boards: CXD2856 + HELENE (CXD2858ER) at 16MHz */
-		cfg->tuner_xtal = SONY_ASCOT3_XTAL_16000KHz;
 		cfg->set_lnb	= it930x_set_lnb;
 		cfg->fe_sat	= &ife->fe_sat;
-	} else {
-		/* Geniatech: CXD2878 + integrated Ascot3 at 24MHz */
-		cfg->tuner_xtal = SONY_ASCOT3_XTAL_24000KHz;
 	}
 
 	ife->fe = dvb_attach(cxd2878_attach, cfg, ife->i2c);
@@ -2052,7 +1930,7 @@ static int it930x_probe(struct usb_interface *intf,
 	if (ret)
 		return ret;
 
-	board = &it930x_boards[id->driver_info];
+	board = (const struct it930x_board_cfg *)id->driver_info;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev)
@@ -2179,12 +2057,136 @@ static void it930x_disconnect(struct usb_interface *intf)
 /* -------- USB device ID table -------- */
 
 static const struct usb_device_id it930x_id_table[] = {
-	{ USB_DEVICE(0x23e2, 0x2b02), .driver_info = 0 },	/* Geniatech HDTV Mate */
-	{ USB_DEVICE(0x0511, 0x084e), .driver_info = 1 },	/* PLEX PX-MLT5U */
-	{ USB_DEVICE(0x0511, 0x024e), .driver_info = 2 },	/* PLEX PX-MLT5PE */
-	{ USB_DEVICE(0x0511, 0x0252), .driver_info = 3 },	/* PLEX PX-MLT8PE3 */
-	{ USB_DEVICE(0x0511, 0x0253), .driver_info = 4 },	/* PLEX PX-MLT8PE5 */
-	{ USB_DEVICE(0x0511, 0x0254), .driver_info = 5 },	/* Digibest ISDB6014 */
+	{ USB_DEVICE(0x23e2, 0x2b02), .driver_info = (kernel_ulong_t)
+	  &(const struct it930x_board_cfg){	/* Zenview HDTV Mate */
+		.name		= "Zenview HDTV Mate",
+		.fw_file	= "dvb-usb-it9306-01.fw",
+		.num_frontends	= 1,
+		.fe		= {
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+		},
+		.gpio_reset	= 2,
+		.gpio_always_hi	= 14,
+		.f41a_val	= 0x05,
+		.i2c_notify	= 0x38,
+		.tuner_xtal	= SONY_ASCOT3_XTAL_24000KHz,
+	  }
+	},
+	{ USB_DEVICE(0x0511, 0x084e), .driver_info = (kernel_ulong_t)
+	  &(const struct it930x_board_cfg){	/* PLEX PX-MLT5U */
+		.name		= "PLEX PX-MLT5U",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 5,
+		.fe = {
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 3, .i2c_bus = 1,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 1, .i2c_bus = 1,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+			{ .ts_port = 2, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+	  }
+	},
+	{ USB_DEVICE(0x0511, 0x024e), .driver_info = (kernel_ulong_t)
+	  &(const struct it930x_board_cfg){	/* PLEX PX-MLT5PE */
+		.name		= "PLEX PX-MLT5PE",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 5,
+		.fe = {
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 1, .i2c_bus = 1,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 2, .i2c_bus = 1,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+			{ .ts_port = 3, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+	  }
+	},
+	{ USB_DEVICE(0x0511, 0x0252), .driver_info = (kernel_ulong_t)
+	  &(const struct it930x_board_cfg){	/* PLEX PX-MLT8PE3 */
+		.name		= "PLEX PX-MLT8PE3",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 3,
+		.fe = {
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 3, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+	  }
+	},
+	{ USB_DEVICE(0x0511, 0x0253), .driver_info = (kernel_ulong_t)
+	  &(const struct it930x_board_cfg){	/* PLEX PX-MLT8PE5 */
+		.name		= "PLEX PX-MLT8PE5",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 5,
+		.fe = {
+			{ .ts_port = 0, .i2c_bus = 1,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 1, .i2c_bus = 1,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+			{ .ts_port = 2, .i2c_bus = 1,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 3, .i2c_bus = 3,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+	  }
+	},
+	{ USB_DEVICE(0x0511, 0x0254), .driver_info = (kernel_ulong_t)
+	  &(const struct it930x_board_cfg){	/* Digibest ISDB6014 4TS */
+		.name		= "Digibest ISDB6014 4TS",
+		.fw_file	= "it930x-firmware.bin",
+		.num_frontends	= 4,
+		.fe = {
+			{ .ts_port = 0, .i2c_bus = 3,
+			  .demod_addr = 0x65, .tuner_addr = 0x60 },
+			{ .ts_port = 1, .i2c_bus = 1,
+			  .demod_addr = 0x6c, .tuner_addr = 0x60 },
+			{ .ts_port = 2, .i2c_bus = 1,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+			{ .ts_port = 4, .i2c_bus = 3,
+			  .demod_addr = 0x64, .tuner_addr = 0x60 },
+		},
+		.gpio_power	= 7,
+		.gpio_reset	= 2,
+		.gpio_lnb	= 11,
+		.f41a_val	= 0x01,
+		.tuner_xtal	= SONY_ASCOT3_XTAL_16000KHz,
+	  }
+	},
 	{ }
 };
 MODULE_DEVICE_TABLE(usb, it930x_id_table);

@@ -1,30 +1,38 @@
-# CXD2878 Linux DVB Driver
+# CXD28xx Linux DVB Driver
 
-Out-of-tree Linux kernel driver for the **Sony CXD2878** demodulator and associated tuners, supporting a wide range of broadcast standards.
+Out-of-tree Linux kernel driver for the **Sony CXD28xx** series demodulator and associated tuners, supporting a wide range of broadcast standards.
 
 ## Supported Standards
 
 - DVB-T / DVB-T2
 - DVB-C / DVB-C2
-- ISDB-T / ISDB-C
+- DVB-S / DVB-S2
+- ISDB-T / ISDB-S
 - ATSC 1.0
-- ATSC 3.0 (ALP over IP)
+- ATSC 3.0
 - J.83B
 
 ## Supported Hardware
 
-| Device | USB Bridge | Demod | Tuner | Module |
-|--------|-----------|-------|-------|--------|
-| Geniatech HDTV Mate | ITE IT930x | CXD2878 | Ascot3 (internal) | `it930x.ko` |
-| TurboSight TBS 5530 | Cypress FX2 | CXD2878 + M88RS6060 | Ascot3 + M88RS6060 | `tbs5530.ko` |
+| Device | USB Bridge | Demod | Tuner | Frontends |
+|--------|-----------|-------|-------|-----------|
+| Zenview(GTMEDIA) HDTV Mate | ITE IT930x | CXD2878 | Ascot3 (internal) | 1 (terr/cable) |
+| PLEX PX-MLT5U | ITE IT930x | CXD2856ER | HELENE (CXD2858ER) | 5 (terr/cable + sat) |
+| PLEX PX-MLT5PE | ITE IT930x | CXD2856ER | HELENE (CXD2858ER) | 5 (terr/cable + sat) |
+| PLEX PX-MLT8PE3 | ITE IT930x | CXD2856ER | HELENE (CXD2858ER) | 3 (terr/cable + sat) |
+| PLEX PX-MLT8PE5 | ITE IT930x | CXD2856ER | HELENE (CXD2858ER) | 5 (terr/cable + sat) |
+| Digibest ISDB6014 4TS | ITE IT930x | CXD2856ER | HELENE (CXD2858ER) | 4 (terr/cable + sat) |
+| TurboSight TBS 5530 | Cypress FX2 | CXD2878 + M88RS6060 | Ascot3 + M88RS6060 | 2 (terr/cable + sat) |
 
-The TBS 5530 additionally supports **DVB-S / DVB-S2 / DVB-S2X** via the Montage M88RS6060 demod/tuner.
+PX-MLT and Digibest devices expose two virtual frontends per tuner: one for terrestrial/cable (DVB-T/T2/C, ISDB-T) and one for satellite (DVB-S/S2, ISDB-S) with LNB control via DiSEqC.
+
+The TBS 5530 uses the Montage M88RS6060 for DVB-S/S2/S2X satellite reception.
 
 ## Modules
 
 | Module | Description |
 |--------|-------------|
-| `cxd2878.ko` | Sony CXD2878 demodulator + Ascot3 tuner driver |
+| `cxd2878.ko` | Sony CXD2878/CXD2856 demodulator + Ascot3/HELENE tuner driver |
 | `m88rs6060.ko` | Montage M88RS6060 satellite demod/tuner driver |
 | `atsc3_alp.ko` | ATSC 3.0 ALP parser and network interface (shared) |
 | `it930x.ko` | ITE IT930x USB bridge driver |
@@ -68,8 +76,11 @@ The following firmware files are required and should be placed in `/lib/firmware
 
 | Device | Firmware |
 |--------|----------|
-| IT930x | `dvb-usb-it9306-01.fw` |
+| IT930x (Zenview) | `dvb-usb-it9306-01.fw` |
+| IT930x (PLEX, Digibest) | `it930x-firmware.bin` |
 | TBS 5530 | `dvb-usb-id5530.fw` |
+
+For PLEX and Digibest devices, refer [px4_drv](https://github.com/nns779/px4_drv) to extract from vendor drivers.
 
 ## ATSC 3.0
 
