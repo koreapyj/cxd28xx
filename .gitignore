@@ -1,0 +1,39 @@
+# Kernel module build artifacts
+*.o
+*.ko
+*.ko.cmd
+*.mod
+*.mod.c
+*.mod.o
+*.order
+*.symvers
+*.unsigned
+.*.cmd
+.*.d
+.tmp_versions/
+modules.builtin
+modules.order
+Module.symvers
+modules.nsdeps
+
+# PC/SC IFD handler build artifacts
+pcsc/*.so
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.code-workspace
+.project
+.cproject
+.settings/
+tags
+TAGS
+cscope.*
+compile_commands.json
+
+# Agents
+CLAUDE.md
+.claude
