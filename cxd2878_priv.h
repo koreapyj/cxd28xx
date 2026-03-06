@@ -185,6 +185,8 @@ enum sony_dtv_system_t{
     SONY_DTV_SYSTEM_ANY             /**< Used for multiple system scanning / blind tuning */
 } ;
 
+#define SONY_DTV_SYSTEM_IS_TERR_CABLE(sys) (((sys) >= SONY_DTV_SYSTEM_DVBT) && ((sys) <= SONY_DTV_SYSTEM_J83B))
+
 
  enum sony_dtv_bandwidth_t{
     SONY_DTV_BW_UNKNOWN = 0,              /**< Unknown bandwidth. */
@@ -211,6 +213,10 @@ enum sony_dtv_system_t{
     u8 tsClkPeriod;        /**< TS clock period */
     u8 clkSelTSIf;         /**< TS clock frequency (low, mid or high) */
 } ;
+struct sony_demod_alp_clk_configuration_t {
+    uint8_t serialClkMode;      /**< Serial clock mode (gated or continuous) */
+    uint8_t clkSelALPIf;        /**< ALP clock frequency (low, mid or high) */
+};
  struct sony_demod_iffreq_config_t{
     u32 configDVBT_5;              /**< DVB-T 5MHz */
     u32 configDVBT_6;              /**< DVB-T 6MHz */
@@ -225,9 +231,13 @@ enum sony_dtv_system_t{
     u32 configDVBC_7;              /**< DVB-C  7MHz */
     u32 configDVBC_8;              /**< DVB-C  8MHz */
     u32 configATSC;                /**< ATSC 1.0 */
+    u32 configATSC3_6;             /**< ATSC 3.0 6MHz */
+    u32 configATSC3_7;             /**< ATSC 3.0 7MHz */
+    u32 configATSC3_8;             /**< ATSC 3.0 8MHz */
     u32 configISDBT_6;             /**< ISDB-T 6MHz */
     u32 configISDBT_7;             /**< ISDB-T 7MHz */
     u32 configISDBT_8;             /**< ISDB-T 8MHz */
+    u32 configISDBC_6;             /**< ISDB-C 6MHz */
     u32 configJ83B_5_06_5_36;      /**< J.83B 5.06/5.36Msps auto selection */
     u32 configJ83B_5_60;           /**< J.83B. 5.6Msps */
 } ;

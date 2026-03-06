@@ -216,7 +216,6 @@ static int tbs5530_fe_sat_init(struct dvb_frontend *fe)
 }
 
 static struct cxd2878_config tbs5530_cfg = {
-	
 		.addr_slvt = 0x64,
 		.xtal      = SONY_DEMOD_XTAL_24000KHz,
 		.tuner_addr = 0x60,
@@ -227,6 +226,7 @@ static struct cxd2878_config tbs5530_cfg = {
 		.ts_clk_mask= 1,
 		.ts_valid = 0,
 		.atscCoreDisable = 0,
+		.atsc3_output = SONY_DEMOD_OUTPUT_ATSC3_ALP_DIV_TS,
 		.lock_flag = 1,
 		.write_properties = NULL,
 		.read_properties = NULL,

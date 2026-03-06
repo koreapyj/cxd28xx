@@ -12,6 +12,14 @@
     SONY_ASCOT3_XTAL_24000KHz,    /**< 24 MHz */
     SONY_ASCOT3_XTAL_41000KHz     /**< 41 MHz */
 } ;
+/**
+ @brief ATSC 3.0 output options.
+*/
+ enum sony_demod_output_atsc3_t{
+	SONY_DEMOD_OUTPUT_ATSC3_ALP,         /**< ALP output */
+	SONY_DEMOD_OUTPUT_ATSC3_ALP_DIV_TS,  /**< ALP divided into 188byte */
+	SONY_DEMOD_OUTPUT_ATSC3_BBP          /**< BBP output */
+} ;
  
 #define SONY_DEMOD_MAKE_IFFREQ_CONFIG(iffreq) ((u32)(((iffreq)/48.0)*16777216.0 + 0.5))
 #define SONY_DEMOD_ATSC_MAKE_IFFREQ_CONFIG(iffreq) ((u32)(((iffreq)/24.0)*4294967296.0 + 0.5))
@@ -74,6 +82,8 @@ struct cxd2878_config{
 	u8 ts_valid;
 
 	u8 atscCoreDisable;
+
+	enum sony_demod_output_atsc3_t atsc3_output;
 	
 	bool lock_flag;  //for usb device 
 	//for ecp3 update

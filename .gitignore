@@ -37,3 +37,5 @@ compile_commands.json
 # Agents
 CLAUDE.md
 .claude
+
+utils/atsc3-zap
