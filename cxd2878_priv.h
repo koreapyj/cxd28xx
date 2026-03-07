@@ -147,7 +147,77 @@ struct sony_freia_terr_adjust_param_t {
     u8 BW_OFFSET;         /**< Addr:0x6F Bit[4:0] : 5bit signed. BW offset (kHz) = BW_OFFSET x 50 (BW_OFFSET x 10 in 1.7MHzBW) */
     u8 AGC_SEL;           /**< Addr:0x74 Bit[5:4] : AGC pin select. (0: AGC1, 1: AGC2) 0xFF means Auto (by config flags) */
     u8 IF_OUT_SEL;        /**< Addr:0x74 Bit[0:1] : IFOUT pin select. (0: IFOUT1, 1: IFOUT2) 0xFF means Auto. (by config flags) */
-};    
+};
+
+////////////////////////////////
+/**
+ @brief Analog/Digital terrestrial, satellite broadcasting system definitions supported by HELENE.
+
+        Fc : Center Frequency, Fp : Picture Frequency
+*/
+enum sony_helene_tv_system_t {
+    SONY_HELENE_TV_SYSTEM_UNKNOWN,
+    /* Terrestrial Analog */
+    SONY_HELENE_ATV_MN_EIAJ,  /**< System-M (Japan) (IF: Fp=5.75MHz in default) */
+    SONY_HELENE_ATV_MN_SAP,   /**< System-M (US)    (IF: Fp=5.75MHz in default) */
+    SONY_HELENE_ATV_MN_A2,    /**< System-M (Korea) (IF: Fp=5.9MHz in default) */
+    SONY_HELENE_ATV_BG,       /**< System-B/G       (IF: Fp=7.3MHz in default) */
+    SONY_HELENE_ATV_I,        /**< System-I         (IF: Fp=7.85MHz in default) */
+    SONY_HELENE_ATV_DK,       /**< System-D/K       (IF: Fp=7.85MHz in default) */
+    SONY_HELENE_ATV_L,        /**< System-L         (IF: Fp=7.85MHz in default) */
+    SONY_HELENE_ATV_L_DASH,   /**< System-L DASH    (IF: Fp=2.2MHz in default) */
+    /* Terrestrial/Cable Digital */
+    SONY_HELENE_DTV_8VSB,     /**< ATSC 8VSB        (IF: Fc=3.7MHz in default) */
+    SONY_HELENE_DTV_QAM,      /**< US QAM           (IF: Fc=3.7MHz in default) */
+    SONY_HELENE_DTV_ISDBT_6,  /**< ISDB-T 6MHzBW    (IF: Fc=3.55MHz in default) */
+    SONY_HELENE_DTV_ISDBT_7,  /**< ISDB-T 7MHzBW    (IF: Fc=4.15MHz in default) */
+    SONY_HELENE_DTV_ISDBT_8,  /**< ISDB-T 8MHzBW    (IF: Fc=4.75MHz in default) */
+    SONY_HELENE_DTV_DVBT_5,   /**< DVB-T 5MHzBW     (IF: Fc=3.6MHz in default) */
+    SONY_HELENE_DTV_DVBT_6,   /**< DVB-T 6MHzBW     (IF: Fc=3.6MHz in default) */
+    SONY_HELENE_DTV_DVBT_7,   /**< DVB-T 7MHzBW     (IF: Fc=4.2MHz in default) */
+    SONY_HELENE_DTV_DVBT_8,   /**< DVB-T 8MHzBW     (IF: Fc=4.8MHz in default) */
+    SONY_HELENE_DTV_DVBT2_1_7,/**< DVB-T2 1.7MHzBW  (IF: Fc=3.5MHz in default) */
+    SONY_HELENE_DTV_DVBT2_5,  /**< DVB-T2 5MHzBW    (IF: Fc=3.6MHz in default) */
+    SONY_HELENE_DTV_DVBT2_6,  /**< DVB-T2 6MHzBW    (IF: Fc=3.6MHz in default) */
+    SONY_HELENE_DTV_DVBT2_7,  /**< DVB-T2 7MHzBW    (IF: Fc=4.2MHz in default) */
+    SONY_HELENE_DTV_DVBT2_8,  /**< DVB-T2 8MHzBW    (IF: Fc=4.8MHz in default) */
+    SONY_HELENE_DTV_DVBC_6,   /**< DVB-C 6MHzBW     (IF: Fc=3.7MHz in default) */
+    SONY_HELENE_DTV_DVBC_8,   /**< DVB-C 8MHzBW     (IF: Fc=4.9MHz in default) */
+    SONY_HELENE_DTV_DVBC2_6,  /**< DVB-C2 6MHzBW    (IF: Fc=3.7MHz in default) */
+    SONY_HELENE_DTV_DVBC2_8,  /**< DVB-C2 8MHzBW    (IF: Fc=4.9MHz in default) */
+    SONY_HELENE_DTV_J83B_5_6, /**< J.83B 5.6Msps    (IF: Fc=3.75MHz in default) */
+    SONY_HELENE_DTV_DTMB,     /**< DTMB             (IF: Fc=5.1MHz in default) */
+    /* Satellite */
+    SONY_HELENE_STV_ISDBS,    /**< ISDB-S */
+    SONY_HELENE_STV_DVBS,     /**< DVB-S */
+    SONY_HELENE_STV_DVBS2,    /**< DVB-S2 */
+
+    SONY_HELENE_ATV_MIN = SONY_HELENE_ATV_MN_EIAJ, /**< Minimum analog terrestrial system */
+    SONY_HELENE_ATV_MAX = SONY_HELENE_ATV_L_DASH,  /**< Maximum analog terrestrial system */
+    SONY_HELENE_DTV_MIN = SONY_HELENE_DTV_8VSB,    /**< Minimum digital terrestrial system */
+    SONY_HELENE_DTV_MAX = SONY_HELENE_DTV_DTMB,    /**< Maximum digital terrestrial system */
+    SONY_HELENE_TERR_TV_SYSTEM_NUM,                /**< Number of supported terrestrial broadcasting system */
+    SONY_HELENE_STV_MIN = SONY_HELENE_STV_ISDBS,   /**< Minimum satellite system */
+    SONY_HELENE_STV_MAX = SONY_HELENE_STV_DVBS2    /**< Maximum satellite system */
+};
+/**
+ @brief HELENE settings that may need to change depend on customer's system.
+*/
+typedef struct sony_helene_terr_adjust_param_t {
+    uint8_t RF_GAIN;           /**< Addr:0x69 Bit[6:4] : RFVGA gain. 0xFF means Auto. (RF_GAIN_SEL = 1) */
+    uint8_t IF_BPF_GC;         /**< Addr:0x69 Bit[3:0] : IF_BPF gain. */
+    uint8_t RFOVLD_DET_LV1_VL; /**< Addr:0x6B Bit[3:0] : RF overload RF input detect level. (FRF <= 172MHz) */
+    uint8_t RFOVLD_DET_LV1_VH; /**< Addr:0x6B Bit[3:0] : RF overload RF input detect level. (172MHz < FRF <= 464MHz) */
+    uint8_t RFOVLD_DET_LV1_U;  /**< Addr:0x6B Bit[3:0] : RF overload RF input detect level. (FRF > 464MHz) */
+    uint8_t IFOVLD_DET_LV_VL;  /**< Addr:0x6C Bit[2:0] : Internal RFAGC detect level. (FRF <= 172MHz) */
+    uint8_t IFOVLD_DET_LV_VH;  /**< Addr:0x6C Bit[2:0] : Internal RFAGC detect level. (172MHz < FRF <= 464MHz) */
+    uint8_t IFOVLD_DET_LV_U;   /**< Addr:0x6C Bit[2:0] : Internal RFAGC detect level. (FRF > 464MHz) */
+    uint8_t IF_BPF_F0;         /**< Addr:0x6D Bit[5:4] : IF filter center offset. */
+    uint8_t BW;                /**< Addr:0x6D Bit[1:0] : 6MHzBW(0x00) or 7MHzBW(0x01) or 8MHzBW(0x02) or 1.7MHzBW(0x03) */
+    uint8_t FIF_OFFSET;        /**< Addr:0x6E Bit[4:0] : 5bit signed. IF offset (kHz) = FIF_OFFSET x 50 */
+    uint8_t BW_OFFSET;         /**< Addr:0x6F Bit[4:0] : 5bit signed. BW offset (kHz) = BW_OFFSET x 50 (BW_OFFSET x 10 in 1.7MHzBW) */
+    uint8_t IS_LOWERLOCAL;     /**< Addr:0x9C Bit[0]   : Local polarity. (0: Upper Local, 1: Lower Local) */
+} sony_helene_terr_adjust_param_t;
     
 ////////////////////////
  enum sony_demod_chip_id_t{
@@ -162,6 +232,7 @@ struct sony_freia_terr_adjust_param_t {
 } ;
  enum sony_ascot3_chip_id_t{
     SONY_ASCOT3_CHIP_ID_UNKNOWN,  /**< Unknown */
+    SONY_ASCOT3_CHIP_ID_2858,     /**< CXD2858ER (HELENE) */
     SONY_ASCOT3_CHIP_ID_2871,     /**< CXD2871 (for TV) */
     SONY_ASCOT3_CHIP_ID_2872,     /**< CXD2872 (for STB) */
     SONY_ASCOT3_CHIP_ID_2871A,    /**< CXD2871A (ASCOT3I) (for TV) */

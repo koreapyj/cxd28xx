@@ -20,6 +20,22 @@
 	SONY_DEMOD_OUTPUT_ATSC3_ALP_DIV_TS,  /**< ALP divided into 188byte */
 	SONY_DEMOD_OUTPUT_ATSC3_BBP          /**< BBP output */
 } ;
+
+#define SONY_TUNER_IS_ASCOT3(chip_id) (\
+	chip_id == SONY_DEMOD_CHIP_ID_CXD2878 ||\
+	chip_id == SONY_DEMOD_CHIP_ID_CXD2879 ||\
+	chip_id == SONY_DEMOD_CHIP_ID_CXD6802 \
+)
+
+#define SONY_TUNER_IS_FRIEA(chip_id) (\
+	chip_id == SONY_DEMOD_CHIP_ID_CXD6822 ||\
+	chip_id == SONY_DEMOD_CHIP_ID_CXD2878A \
+)
+
+#define SONY_TUNER_IS_HELENE(chip_id) (\
+	chip_id == SONY_DEMOD_CHIP_ID_CXD2856 ||\
+	chip_id == SONY_DEMOD_CHIP_ID_CXD2857 \
+)
  
 #define SONY_DEMOD_MAKE_IFFREQ_CONFIG(iffreq) ((u32)(((iffreq)/48.0)*16777216.0 + 0.5))
 #define SONY_DEMOD_ATSC_MAKE_IFFREQ_CONFIG(iffreq) ((u32)(((iffreq)/24.0)*4294967296.0 + 0.5))
@@ -97,7 +113,12 @@ struct cxd2878_config{
 	void (*RF_switch)(struct i2c_adapter * i2c,u8 rf_in,u8 flag);
 	u8 rf_port; //for change command
 	void (*TS_switch)(struct i2c_adapter * i2c,u8 flag);  //5590
-	void (*LED_switch)(struct i2c_adapter * i2c,u8 flag); //5590	
+	void (*LED_switch)(struct i2c_adapter * i2c,u8 flag); //5590
+
+	/* LNB power control callback (stub — implemented next phase) */
+	int (*set_lnb)(struct i2c_adapter *i2c, int on);
+	/* Satellite virtual frontend pointer (stub — implemented next phase) */
+	struct dvb_frontend **fe_sat;
 };
 
 #if IS_REACHABLE(CONFIG_DVB_CXD2878)
