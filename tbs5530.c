@@ -1,15 +1,14 @@
+/* SPX-License-Identifier: GPL-2.0-only */
 /*
- * TurboSight TBS 5530  driver
- *
  * Copyright (c) 2022 Davin <Davin@tbsdtv.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation, version 2.
- *
+ * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
  */
 
 #include <linux/version.h>
+#include <linux/module.h>
+#include <linux/slab.h>
+#include <linux/firmware.h>
+
 #include "tbs5530.h"
 #include "cxd2878.h"
 #include "m88rs6060.h"
@@ -17,20 +16,10 @@
 #define tbs5530_READ_MSG 0
 #define tbs5530_WRITE_MSG 1
 
-
-struct tbs5530_state {
-	struct i2c_client *i2c_client;
-	u8 initialized;
-};
-
-
-/* debug */
-static int dvb_usb_tbs5530_debug;
-module_param_named(debug, dvb_usb_tbs5530_debug, int, 0644);
-MODULE_PARM_DESC(debug, "set debugging level (1=info 2=xfer (or-able))." 
-							DVB_USB_DEBUG_STATUS);
-
 DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
+
+#define err(format, arg...)  printk(KERN_ERR     "tbs5530: " format "\n" , ## arg)
+#define info(format, arg...) printk(KERN_INFO    "tbs5530: " format "\n" , ## arg)
 
 static int tbs5530_op_rw(struct usb_device *dev, u8 request, u16 value,
 				u16 index, u8 * data, u16 len, int flags)
@@ -57,17 +46,17 @@ static int tbs5530_op_rw(struct usb_device *dev, u8 request, u16 value,
 }
 
 /* I2C */
-static int tbs5530_i2c_transfer(struct i2c_adapter *adap, 
+static int tbs5530_i2c_transfer(struct i2c_adapter *adap,
 					struct i2c_msg msg[], int num)
 {
-	struct dvb_usb_device *d = i2c_get_adapdata(adap);
+	struct tbs5530_dev *dev = i2c_get_adapdata(adap);
 	int i = 0;
 	u8 buf6[50];
 	u8 inbuf[50];
 
-	if (!d)
+	if (!dev)
 		return -ENODEV;
-	if (mutex_lock_interruptible(&d->i2c_mutex) < 0)
+	if (mutex_lock_interruptible(&dev->i2c_mutex) < 0)
 		return -EAGAIN;
 
 	switch (num) {
@@ -77,10 +66,10 @@ static int tbs5530_i2c_transfer(struct i2c_adapter *adap,
 		//register
 		buf6[2] = msg[0].buf[0];
 
-		tbs5530_op_rw(d->udev, 0x90, 0, 0,
+		tbs5530_op_rw(dev->udev, 0x90, 0, 0,
 					buf6, 3, tbs5530_WRITE_MSG);
 		//msleep(5);
-		tbs5530_op_rw(d->udev, 0x91, 0, 0,
+		tbs5530_op_rw(dev->udev, 0x91, 0, 0,
 					inbuf, buf6[0], tbs5530_READ_MSG);
 		memcpy(msg[1].buf, inbuf, msg[1].len);
 
@@ -91,13 +80,13 @@ static int tbs5530_i2c_transfer(struct i2c_adapter *adap,
 		for(i=0;i<msg[0].len;i++) {
 			buf6[2+i] = msg[0].buf[i];//register
 		}
-		tbs5530_op_rw(d->udev, 0x80, 0, 0,
+		tbs5530_op_rw(dev->udev, 0x80, 0, 0,
 			buf6, msg[0].len+2, tbs5530_WRITE_MSG);
 		break;
 
 	}
 
-	mutex_unlock(&d->i2c_mutex);
+	mutex_unlock(&dev->i2c_mutex);
 	return num;
 }
 
@@ -112,39 +101,120 @@ static struct i2c_algorithm tbs5530_i2c_algo = {
 };
 
 
+/* USB bulk streaming (EP 0x82) */
 
-static int tbs5530_read_mac_address(struct dvb_usb_device *d, u8 mac[6])
+static void tbs5530_urb_complete(struct urb *urb)
 {
-	int i,ret;
-	u8 ibuf[3] = {0, 0,0};
-	u8 eeprom[256], eepromline[16];
+	struct tbs5530_dev *dev = urb->context;
 
-	for (i = 0; i < 256; i++) {
-		ibuf[0]=1;//lenth
-		ibuf[1]=0xa0;//eeprom addr
-		ibuf[2]=i;//register
-		ret = tbs5530_op_rw(d->udev, 0x90, 0, 0,
-					ibuf, 3, tbs5530_WRITE_MSG);
-		ret = tbs5530_op_rw(d->udev, 0x91, 0, 0,
-					ibuf, 1, tbs5530_READ_MSG);
-			if (ret < 0) {
-				err("read eeprom failed.");
-				return -1;
-			} else {
-				eepromline[i%16] = ibuf[0];
-				eeprom[i] = ibuf[0];
-			}
-			
-			if ((i % 16) == 15) {
-				deb_xfer("%02x: ", i - 15);
-				debug_dump(eepromline, 16, deb_xfer);
-			}
+	if (!dev->streaming)
+		return;
+
+	switch (urb->status) {
+	case 0:
+		break;
+	case -ECONNRESET:
+	case -ENOENT:
+	case -ESHUTDOWN:
+		return;
+	default:
+		goto resubmit;
 	}
-	memcpy(mac, eeprom + 16, 6);
-	return 0;
-};
 
-static struct dvb_usb_device_properties tbs5530_properties;
+	if (urb->actual_length > 0)
+		dvb_dmx_swfilter(&dev->demux, urb->transfer_buffer,
+				 urb->actual_length);
+
+resubmit:
+	usb_submit_urb(urb, GFP_ATOMIC);
+}
+
+static int tbs5530_start_streaming(struct tbs5530_dev *dev)
+{
+	u8 buf[2];
+	int i, ret;
+
+	if (dev->streaming)
+		return 0;
+
+	buf[0] = 10;
+	buf[1] = dev->active_fe;
+	tbs5530_op_rw(dev->udev, 0x8a, 0, 0, buf, 2, tbs5530_WRITE_MSG);
+
+	dev->streaming = true;
+
+	for (i = 0; i < NUM_URBS; i++) {
+		usb_fill_bulk_urb(dev->urbs[i], dev->udev,
+				  usb_rcvbulkpipe(dev->udev, 0x82),
+				  dev->urb_bufs[i], URB_BUF_SIZE,
+				  tbs5530_urb_complete, dev);
+		ret = usb_submit_urb(dev->urbs[i], GFP_KERNEL);
+		if (ret) {
+			while (--i >= 0)
+				usb_kill_urb(dev->urbs[i]);
+			dev->streaming = false;
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+static void tbs5530_stop_streaming(struct tbs5530_dev *dev)
+{
+	int i;
+
+	if (!dev->streaming)
+		return;
+
+	dev->streaming = false;
+
+	for (i = 0; i < NUM_URBS; i++)
+		usb_kill_urb(dev->urbs[i]);
+}
+
+/* DVB demux feed callbacks */
+
+static int tbs5530_start_feed(struct dvb_demux_feed *feed)
+{
+	struct tbs5530_dev *dev = feed->demux->priv;
+
+	if (++dev->feed_count == 1)
+		return tbs5530_start_streaming(dev);
+	return 0;
+}
+
+static int tbs5530_stop_feed(struct dvb_demux_feed *feed)
+{
+	struct tbs5530_dev *dev = feed->demux->priv;
+
+	if (--dev->feed_count == 0)
+		tbs5530_stop_streaming(dev);
+	return 0;
+}
+
+/* Frontend TS routing */
+
+static int tbs5530_fe_ter_init(struct dvb_frontend *fe)
+{
+	struct tbs5530_dev *dev = fe->dvb->priv;
+
+	dev->active_fe = 0;
+	if (dev->fe_ter_ops_orig.init)
+		return dev->fe_ter_ops_orig.init(fe);
+	return 0;
+}
+
+static int tbs5530_fe_sat_init(struct dvb_frontend *fe)
+{
+	struct tbs5530_dev *dev = fe->dvb->priv;
+
+	dev->active_fe = 1;
+	if (dev->fe_sat_ops_orig.init)
+		return dev->fe_sat_ops_orig.init(fe);
+	return 0;
+}
+
 static struct cxd2878_config tbs5530_cfg = {
 	
 		.addr_slvt = 0x64,
@@ -158,99 +228,175 @@ static struct cxd2878_config tbs5530_cfg = {
 		.ts_valid = 0,
 		.atscCoreDisable = 0,
 		.lock_flag = 1,
-		.write_properties = NULL, 
-		.read_properties = NULL,	
+		.write_properties = NULL,
+		.read_properties = NULL,
 	};
 
+/* DVB stack setup */
 
-
-static int tbs5530_sat_streaming_ctrl(struct dvb_usb_adapter*adap,int onoff) //for open dvbs ts switch
+static int tbs5530_dvb_init(struct tbs5530_dev *dev)
 {
-	struct dvb_usb_device *d = adap->dev;
-	u8 buf[20];
-	buf[0] = 10;
-	buf[1] = 1;
-	tbs5530_op_rw(d->udev, 0x8a, 0, 0,
-			buf, 2, tbs5530_WRITE_MSG);
-			
-	return 0;
-}
-static int tbs5530_ter_cable_streaming_ctrl(struct dvb_usb_adapter*adap,int onoff)//for open dvbt/c ts 
-{
-	struct dvb_usb_device *d = adap->dev;
-	u8 buf[20];
-	buf[0] = 10;
-	buf[1] = 0;
-	tbs5530_op_rw(d->udev, 0x8a, 0, 0,
-			buf, 2, tbs5530_WRITE_MSG);
-			
-	return 0;
-}
-static int tbs5530_frontend_cxd2878_attach(struct dvb_usb_adapter *adap)
-{
-	struct dvb_usb_device *d = adap->dev;
+	struct dvb_adapter *adap = &dev->dvb_adap;
+	int ret;
 
-	/* attach frontend */
-	adap->fe_adap[0].fe = dvb_attach(cxd2878_attach, &tbs5530_cfg, &d->i2c_adap);
+	ret = dvb_register_adapter(adap, "TurboSight TBS 5530",
+				   THIS_MODULE, &dev->udev->dev,
+				   adapter_nr);
+	if (ret < 0)
+		return ret;
 
-	if(adap->fe_adap[0].fe == NULL)
-		return -ENODEV;
+	adap->priv = dev;
 
-	strscpy(adap->fe_adap[0].fe->ops.info.name,d->props.devices[0].name,60);
-	strcat(adap->fe_adap[0].fe->ops.info.name," DVB-T/T2/C/C2,ISDB-T/C,ATSC,J83B");
-	return 0;		
-}
-static int tbs5530_frontend_m88rs6060_attach(struct dvb_usb_adapter *adap)
-{
-	struct dvb_usb_device *d = adap->dev;
-	struct tbs5530_state *st = d->priv;
-	struct i2c_client *client;
-	struct i2c_board_info info;
-	struct m88rs6060_cfg m88rs6060_config;
-	u8 buf[20];
-	/* attach frontend */
-	memset(&m88rs6060_config,0,sizeof(m88rs6060_config));
-	m88rs6060_config.fe = &adap->fe_adap[1].fe;
-	m88rs6060_config.clk = 27000000;
-	m88rs6060_config.i2c_wr_max = 33;
-	m88rs6060_config.ts_mode = MtFeTsOutMode_Common;
-	m88rs6060_config.ts_pinswitch = 0;
-	m88rs6060_config.envelope_mode = 0;
-	m88rs6060_config.demod_adr = 0x69;
-	m88rs6060_config.tuner_adr = 0x2c;
-	m88rs6060_config.repeater_value = 0x11;
-	m88rs6060_config.read_properties = NULL;
-	m88rs6060_config.write_properties  = NULL;
-
-	memset(&info, 0, sizeof(struct i2c_board_info));
-	strscpy(info.type, "m88rs6060", I2C_NAME_SIZE);
-	info.addr = 0x69;
-	info.platform_data = &m88rs6060_config;
-	request_module(info.type);
-	client = i2c_new_client_device(&d->i2c_adap,&info);
-	if(!i2c_client_has_driver(client))
-				return -ENODEV;
-	if (!try_module_get(client->dev.driver->owner)) {
-			i2c_unregister_device(client);
-			return -ENODEV;
+	/* attach CXD2878 frontend */
+	dev->fe_ter = dvb_attach(cxd2878_attach, &tbs5530_cfg,
+				 &dev->i2c_adap);
+	if (!dev->fe_ter) {
+		ret = -ENODEV;
+		goto err_adapter;
 	}
 
-	st->i2c_client = client;
+	strscpy(dev->fe_ter->ops.info.name,
+		"TurboSight TBS 5530 DVB-T/T2/C/C2,ISDB-T/C,ATSC,J83B,ATSC3",
+		sizeof(dev->fe_ter->ops.info.name));
 
-	buf[0] = 0;
-	buf[1] = 0;
-	tbs5530_op_rw(d->udev, 0xb7, 0, 0,
-			buf, 2, tbs5530_WRITE_MSG);
-	buf[0] = 8;
-	buf[1] = 1;
-	tbs5530_op_rw(d->udev, 0x8a, 0, 0,
-			buf, 2, tbs5530_WRITE_MSG);
-	msleep(10);
-	
-	strscpy(adap->fe_adap[1].fe->ops.info.name,d->props.devices[0].name,52);
-	strcat(adap->fe_adap[1].fe->ops.info.name," DVB-S/S2/S2X");
+	dev->fe_ter_ops_orig = dev->fe_ter->ops;
+	dev->fe_ter->ops.init = tbs5530_fe_ter_init;
+
+	ret = dvb_register_frontend(adap, dev->fe_ter);
+	if (ret)
+		goto err_fe_ter;
+
+	/* attach M88RS6060 frontend */
+	{
+		struct m88rs6060_cfg m88rs6060_config;
+		struct i2c_board_info info;
+		u8 buf[20];
+
+		memset(&m88rs6060_config,0,sizeof(m88rs6060_config));
+		m88rs6060_config.fe = &dev->fe_sat;
+		m88rs6060_config.clk = 27000000;
+		m88rs6060_config.i2c_wr_max = 33;
+		m88rs6060_config.ts_mode = MtFeTsOutMode_Common;
+		m88rs6060_config.ts_pinswitch = 0;
+		m88rs6060_config.envelope_mode = 0;
+		m88rs6060_config.demod_adr = 0x69;
+		m88rs6060_config.tuner_adr = 0x2c;
+		m88rs6060_config.repeater_value = 0x11;
+		m88rs6060_config.read_properties = NULL;
+		m88rs6060_config.write_properties  = NULL;
+
+		memset(&info, 0, sizeof(struct i2c_board_info));
+		strscpy(info.type, "m88rs6060", I2C_NAME_SIZE);
+		info.addr = 0x69;
+		info.platform_data = &m88rs6060_config;
+		request_module(info.type);
+		dev->i2c_client_sat = i2c_new_client_device(&dev->i2c_adap,&info);
+		if(!i2c_client_has_driver(dev->i2c_client_sat)) {
+			ret = -ENODEV;
+			goto err_fe_ter_unreg;
+		}
+		if (!try_module_get(dev->i2c_client_sat->dev.driver->owner)) {
+			i2c_unregister_device(dev->i2c_client_sat);
+			dev->i2c_client_sat = NULL;
+			ret = -ENODEV;
+			goto err_fe_ter_unreg;
+		}
+
+		buf[0] = 0;
+		buf[1] = 0;
+		tbs5530_op_rw(dev->udev, 0xb7, 0, 0,
+				buf, 2, tbs5530_WRITE_MSG);
+		buf[0] = 8;
+		buf[1] = 1;
+		tbs5530_op_rw(dev->udev, 0x8a, 0, 0,
+				buf, 2, tbs5530_WRITE_MSG);
+		msleep(10);
+
+		strscpy(dev->fe_sat->ops.info.name,
+			"TurboSight TBS 5530 DVB-S/S2/S2X",
+			sizeof(dev->fe_sat->ops.info.name));
+
+		dev->fe_sat_ops_orig = dev->fe_sat->ops;
+		dev->fe_sat->ops.init = tbs5530_fe_sat_init;
+
+		ret = dvb_register_frontend(adap, dev->fe_sat);
+		if (ret)
+			goto err_i2c_client;
+	}
+
+	/* DVB demux */
+	dev->demux.dmx.capabilities = DMX_TS_FILTERING |
+				      DMX_SECTION_FILTERING;
+	dev->demux.priv = dev;
+	dev->demux.filternum = 256;
+	dev->demux.feednum = 256;
+	dev->demux.start_feed = tbs5530_start_feed;
+	dev->demux.stop_feed = tbs5530_stop_feed;
+
+	ret = dvb_dmx_init(&dev->demux);
+	if (ret)
+		goto err_fe_sat_unreg;
+
+	dev->dmxdev.filternum = 256;
+	dev->dmxdev.demux = &dev->demux.dmx;
+	dev->dmxdev.capabilities = 0;
+
+	ret = dvb_dmxdev_init(&dev->dmxdev, adap);
+	if (ret)
+		goto err_dmx;
+
+	ret = dvb_net_init(adap, &dev->dvb_net, &dev->demux.dmx);
+	if (ret)
+		goto err_dmxdev;
+
 	return 0;
+
+err_dmxdev:
+	dvb_dmxdev_release(&dev->dmxdev);
+err_dmx:
+	dvb_dmx_release(&dev->demux);
+err_fe_sat_unreg:
+	dvb_unregister_frontend(dev->fe_sat);
+err_i2c_client:
+	module_put(dev->i2c_client_sat->dev.driver->owner);
+	i2c_unregister_device(dev->i2c_client_sat);
+	dev->i2c_client_sat = NULL;
+err_fe_ter_unreg:
+	dvb_unregister_frontend(dev->fe_ter);
+err_fe_ter:
+	dvb_frontend_detach(dev->fe_ter);
+	dev->fe_ter = NULL;
+err_adapter:
+	dvb_unregister_adapter(adap);
+	return ret;
 }
+
+static void tbs5530_dvb_exit(struct tbs5530_dev *dev)
+{
+	dvb_net_release(&dev->dvb_net);
+	dvb_dmxdev_release(&dev->dmxdev);
+	dvb_dmx_release(&dev->demux);
+
+	if (dev->fe_sat) {
+		dvb_unregister_frontend(dev->fe_sat);
+		dvb_frontend_detach(dev->fe_sat);
+	}
+
+	if (dev->i2c_client_sat) {
+		module_put(dev->i2c_client_sat->dev.driver->owner);
+		i2c_unregister_device(dev->i2c_client_sat);
+	}
+
+	if (dev->fe_ter) {
+		dvb_unregister_frontend(dev->fe_ter);
+		dvb_frontend_detach(dev->fe_ter);
+	}
+
+	dvb_unregister_adapter(&dev->dvb_adap);
+}
+
+/* USB probe / disconnect */
+
 static struct usb_device_id tbs5530_table[] = {
 	{USB_DEVICE(0x734c, 0x5530)},
 	{ }
@@ -258,39 +404,34 @@ static struct usb_device_id tbs5530_table[] = {
 
 MODULE_DEVICE_TABLE(usb, tbs5530_table);
 
-static int tbs5530_load_firmware(struct usb_device *dev,
-			const struct firmware *frmwr)
+/* Firmware */
+
+static int tbs5530_load_firmware(struct tbs5530_dev *dev)
 {
 	u8 *b, *p;
 	int ret = 0, i;
 	u8 reset;
 	const struct firmware *fw;
-	switch (dev->descriptor.idProduct) {
-	case 0x5530:
-		ret = request_firmware(&fw, tbs5530_properties.firmware, &dev->dev);
-		if (ret != 0) {
-			err("did not find the firmware file. (%s) "
-			"Please see linux/Documentation/dvb/ for more details "
-			"on firmware-problems.", tbs5530_properties.firmware);
-			return ret;
-		}
-		break;
-	default:
-		fw = frmwr;
-		break;
+
+	ret = request_firmware(&fw, "dvb-usb-id5530.fw", &dev->udev->dev);
+	if (ret != 0) {
+		err("did not find the firmware file. (dvb-usb-id5530.fw) "
+		"Please see linux/Documentation/dvb/ for more details "
+		"on firmware-problems.");
+		return ret;
 	}
 	info("start downloading tbs5530 firmware");
 	p = kmalloc(fw->size, GFP_KERNEL);
 	reset = 1;
 	/*stop the CPU*/
-	tbs5530_op_rw(dev, 0xa0, 0x7f92, 0, &reset, 1, tbs5530_WRITE_MSG);
-	tbs5530_op_rw(dev, 0xa0, 0xe600, 0, &reset, 1, tbs5530_WRITE_MSG);
+	tbs5530_op_rw(dev->udev, 0xa0, 0x7f92, 0, &reset, 1, tbs5530_WRITE_MSG);
+	tbs5530_op_rw(dev->udev, 0xa0, 0xe600, 0, &reset, 1, tbs5530_WRITE_MSG);
 
 	if (p != NULL) {
 		memcpy(p, fw->data, fw->size);
 		for (i = 0; i < fw->size; i += 0x40) {
 			b = (u8 *) p + i;
-			if (tbs5530_op_rw(dev, 0xa0, i, 0, b , 0x40,
+			if (tbs5530_op_rw(dev->udev, 0xa0, i, 0, b , 0x40,
 					tbs5530_WRITE_MSG) != 0x40) {
 				err("error while transferring firmware");
 				ret = -EINVAL;
@@ -299,12 +440,12 @@ static int tbs5530_load_firmware(struct usb_device *dev,
 		}
 		/* restart the CPU */
 		reset = 0;
-		if (ret || tbs5530_op_rw(dev, 0xa0, 0x7f92, 0, &reset, 1,
+		if (ret || tbs5530_op_rw(dev->udev, 0xa0, 0x7f92, 0, &reset, 1,
 					tbs5530_WRITE_MSG) != 1) {
 			err("could not restart the USB controller CPU.");
 			ret = -EINVAL;
 		}
-		if (ret || tbs5530_op_rw(dev, 0xa0, 0xe600, 0, &reset, 1,
+		if (ret || tbs5530_op_rw(dev->udev, 0xa0, 0xe600, 0, &reset, 1,
 					tbs5530_WRITE_MSG) != 1) {
 			err("could not restart the USB controller CPU.");
 			ret = -EINVAL;
@@ -313,94 +454,100 @@ static int tbs5530_load_firmware(struct usb_device *dev,
 		msleep(100);
 		kfree(p);
 	}
+	release_firmware(fw);
 	return ret;
 }
-
-static struct dvb_usb_device_properties tbs5530_properties = {
-	.caps = DVB_USB_IS_AN_I2C_ADAPTER,
-	.usb_ctrl = DEVICE_SPECIFIC,
-	.firmware = "dvb-usb-id5530.fw",
-	.size_of_priv = sizeof(struct tbs5530_state),
-	.no_reconnect = 1,
-
-	.i2c_algo = &tbs5530_i2c_algo,
-
-	.generic_bulk_ctrl_endpoint = 0x81,
-	/* parameter for the MPEG2-data transfer */
-	.num_adapters = 1,
-	.download_firmware = tbs5530_load_firmware,
-	.read_mac_address = tbs5530_read_mac_address,
-	.adapter = {{
-		.num_frontends = 2,
-		.fe = {{
-			.frontend_attach = tbs5530_frontend_cxd2878_attach,
-			.streaming_ctrl = tbs5530_ter_cable_streaming_ctrl,
-			.tuner_attach = NULL,
-			.stream = {
-				.type = USB_BULK,
-				.count = 8,
-				.endpoint = 0x82,
-				.u = {
-					.bulk = {
-						.buffersize = 4096,
-					}
-				}
-			},
-		},{
-			.frontend_attach = tbs5530_frontend_m88rs6060_attach,
-			.streaming_ctrl = tbs5530_sat_streaming_ctrl,
-			.tuner_attach = NULL,
-			.stream = {
-				.type = USB_BULK,
-				.count = 8,
-				.endpoint = 0x82,
-				.u = {
-					.bulk = {
-						.buffersize = 4096,
-					}
-				}
-			},
-		
-		}
-
-		},
-		
-	}},
-
-	.num_device_descs = 1,
-	.devices = {
-		{"TurboSight TBS 5530",
-			{&tbs5530_table[0], NULL},
-			{NULL},
-		}
-	}
-};
 
 static int tbs5530_probe(struct usb_interface *intf,
 		const struct usb_device_id *id)
 {
-	if (0 == dvb_usb_device_init(intf, &tbs5530_properties,
-			THIS_MODULE, NULL, adapter_nr)) {
-		return 0;
+	struct usb_device *udev = interface_to_usbdev(intf);
+	struct tbs5530_dev *dev;
+	int ret, i;
+
+	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	if (!dev)
+		return -ENOMEM;
+
+	dev->udev = usb_get_dev(udev);
+	dev->intf = intf;
+	mutex_init(&dev->i2c_mutex);
+	usb_set_intfdata(intf, dev);
+
+	ret = tbs5530_load_firmware(dev);
+	if (ret)
+		goto err_free;
+
+	/* I2C adapter */
+	dev->i2c_adap.owner = THIS_MODULE;
+	dev->i2c_adap.algo = &tbs5530_i2c_algo;
+	dev->i2c_adap.dev.parent = &intf->dev;
+	strscpy(dev->i2c_adap.name, "TBS5530 I2C",
+		sizeof(dev->i2c_adap.name));
+	i2c_set_adapdata(&dev->i2c_adap, dev);
+
+	ret = i2c_add_adapter(&dev->i2c_adap);
+	if (ret)
+		goto err_free;
+
+	/* URB ring buffer */
+	for (i = 0; i < NUM_URBS; i++) {
+		dev->urbs[i] = usb_alloc_urb(0, GFP_KERNEL);
+		if (!dev->urbs[i]) {
+			ret = -ENOMEM;
+			goto err_urbs;
+		}
+		dev->urb_bufs[i] = kmalloc(URB_BUF_SIZE, GFP_KERNEL);
+		if (!dev->urb_bufs[i]) {
+			ret = -ENOMEM;
+			goto err_urbs;
+		}
 	}
-	return -ENODEV;
+
+	/* DVB stack + frontends */
+	ret = tbs5530_dvb_init(dev);
+	if (ret)
+		goto err_urbs;
+
+	info("TurboSight TBS 5530 attached");
+	return 0;
+
+err_urbs:
+	for (i = 0; i < NUM_URBS; i++) {
+		kfree(dev->urb_bufs[i]);
+		usb_free_urb(dev->urbs[i]);
+	}
+err_i2c:
+	i2c_del_adapter(&dev->i2c_adap);
+err_free:
+	usb_put_dev(dev->udev);
+	usb_set_intfdata(intf, NULL);
+	kfree(dev);
+	return ret;
 }
 
 static void tbs5530_disconnect(struct usb_interface *intf)
 {
-#if 1
-	struct dvb_usb_device *d = usb_get_intfdata(intf);
-	struct tbs5530_state *st = d->priv;
-	struct i2c_client *client;
+	struct tbs5530_dev *dev = usb_get_intfdata(intf);
 
-	/* remove I2C client for tuner/demod*/
-	client = st->i2c_client;
-	if (client) {
-		module_put(client->dev.driver->owner);
-		i2c_unregister_device(client);
+	if (!dev)
+		return;
+
+	int i;
+
+	tbs5530_stop_streaming(dev);
+	tbs5530_dvb_exit(dev);
+
+	for (i = 0; i < NUM_URBS; i++) {
+		kfree(dev->urb_bufs[i]);
+		usb_free_urb(dev->urbs[i]);
 	}
-#endif
-	dvb_usb_device_exit(intf);
+
+	i2c_del_adapter(&dev->i2c_adap);
+
+	usb_set_intfdata(intf, NULL);
+	usb_put_dev(dev->udev);
+	kfree(dev);
 }
 
 static struct usb_driver tbs5530_driver = {
@@ -427,7 +574,7 @@ static void __exit tbs5530_module_exit(void)
 module_init(tbs5530_module_init);
 module_exit(tbs5530_module_exit);
 
-MODULE_AUTHOR("Davin  <Davin@tbsdtv.com>");
+MODULE_AUTHOR("Yoonji Park <koreapyj@dcmys.kr>");
 MODULE_DESCRIPTION("TurboSight TBS 5530 driver");
 MODULE_VERSION("1.0");
 MODULE_LICENSE("GPL");
