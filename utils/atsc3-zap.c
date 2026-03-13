@@ -7,7 +7,7 @@
  * the associated atscN network interface on lock, and keeps running
  * until interrupted.
  *
- * Usage: atsc3-zap <freq_hz> [--plp <id>] [-a <adapter>] [-f <frontend>]
+ * Usage: atsc3-zap <freq_hz> [--plp <id>] [-a <adapter>] [-f <frontend>] [-r]
  *
  * Copyright (c) 2026 Yoonji Park <koreapyj@dcmys.kr>
  */
@@ -19,9 +19,11 @@
 #include <signal.h>
 #include <dirent.h>
 #include <errno.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <linux/dvb/frontend.h>
+#include <linux/dvb/dmx.h>
 
 #ifndef SYS_ATSC3
 #define SYS_ATSC3 35
@@ -32,8 +34,6 @@
 #endif
 
 static volatile int running = 1;
-static char netif_name[IFNAMSIZ];
-static int sock_fd = -1;
 
 static void signal_handler(int sig)
 {
@@ -41,82 +41,16 @@ static void signal_handler(int sig)
 	running = 0;
 }
 
-static int netif_set(const char *ifname, int up)
-{
-	struct ifreq ifr;
-
-	if (sock_fd < 0)
-		return -1;
-
-	memset(&ifr, 0, sizeof(ifr));
-	snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
-
-	if (ioctl(sock_fd, SIOCGIFFLAGS, &ifr) < 0)
-		return -1;
-
-	if (up)
-		ifr.ifr_flags |= IFF_UP;
-	else
-		ifr.ifr_flags &= ~IFF_UP;
-
-	return ioctl(sock_fd, SIOCSIFFLAGS, &ifr);
-}
-
-/*
- * Find the atscN interface belonging to this DVB adapter.
- *
- * The driver sets the netdev parent to the DVB adapter device via
- * SET_NETDEV_DEV. We compare the sysfs device symlink of each atscN
- * interface with the DVB adapter's device path.
- */
-static int find_netif(int adapter)
-{
-	char adapter_dev[256], net_dev[256], adapter_real[PATH_MAX],
-	     net_real[PATH_MAX];
-	struct dirent *de;
-	DIR *dir;
-
-	snprintf(adapter_dev, sizeof(adapter_dev),
-		 "/sys/class/dvb/dvb%d.frontend0/device", adapter);
-	if (!realpath(adapter_dev, adapter_real))
-		return -1;
-
-	dir = opendir("/sys/class/net");
-	if (!dir)
-		return -1;
-
-	while ((de = readdir(dir)) != NULL) {
-		if (strncmp(de->d_name, "atsc", 4) != 0)
-			continue;
-		if (strlen(de->d_name) >= IFNAMSIZ)
-			continue;
-
-		snprintf(net_dev, sizeof(net_dev),
-			 "/sys/class/net/%.15s/device", de->d_name);
-		if (!realpath(net_dev, net_real))
-			continue;
-
-		if (strcmp(adapter_real, net_real) == 0) {
-			memcpy(netif_name, de->d_name,
-			       strlen(de->d_name) + 1);
-			closedir(dir);
-			return 0;
-		}
-	}
-
-	closedir(dir);
-	return -1;
-}
-
 static void usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s <freq_hz> [--plp <id>] [-a <adapter>] [-f <frontend>]\n"
+		"Usage: %s <freq_hz> [--plp <id>] [-a <adapter>] [-f <frontend>] [-r]\n"
 		"\n"
 		"  <freq_hz>       RF frequency in Hz (e.g. 599000000)\n"
 		"  --plp <id>      PLP ID 0-63 (omit for all PLPs)\n"
 		"  -a <adapter>    DVB adapter number (default 0)\n"
-		"  -f <frontend>   Frontend number (default 0)\n",
+		"  -f <frontend>   Frontend number (default 0)\n"
+		"  -r              Record full TS to stdout\n",
 		prog);
 }
 
@@ -124,10 +58,9 @@ int main(int argc, char **argv)
 {
 	unsigned int freq = 0, bw = 6000000;
 	unsigned int stream_id = NO_STREAM_ID_FILTER;
-	int adapter = 0, frontend = 0;
+	int adapter = 0, frontend = 0, record = 0;
 	char fe_path[64];
-	int fe_fd, i;
-	int netif_up = 0;
+	int fe_fd, dmx_fd = -1, dvr_fd = -1, i;
 
 	/* Parse arguments */
 	if (argc < 2) {
@@ -152,6 +85,8 @@ int main(int argc, char **argv)
 			adapter = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
 			frontend = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "-r") == 0) {
+			record = 1;
 		} else {
 			usage(argv[0]);
 			return 1;
@@ -166,9 +101,6 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Cannot open %s: %s\n", fe_path, strerror(errno));
 		return 1;
 	}
-
-	/* Socket for netif control */
-	sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
 
 	/* Setup signal handlers */
 	signal(SIGINT, signal_handler);
@@ -224,60 +156,95 @@ int main(int argc, char **argv)
 	}
 
 	if (stream_id != NO_STREAM_ID_FILTER)
-		printf("Tuning %u Hz, PLP %u ...\n", freq, stream_id);
+		fprintf(stderr, "Tuning %u Hz, PLP %u ...\n", freq, stream_id);
 	else
-		printf("Tuning %u Hz, all PLPs ...\n", freq);
+		fprintf(stderr, "Tuning %u Hz, all PLPs ...\n", freq);
 
-	/* Poll for lock */
-	while (running) {
-		enum fe_status status = 0;
+	/* Set up demux and DVR for recording */
+	if (record) {
+		char dmx_path[64], dvr_path[64];
+		struct dmx_pes_filter_params filter;
 
-		if (ioctl(fe_fd, FE_READ_STATUS, &status) < 0) {
-			perror("FE_READ_STATUS");
-			break;
+		snprintf(dmx_path, sizeof(dmx_path),
+			 "/dev/dvb/adapter%d/demux0", adapter);
+		snprintf(dvr_path, sizeof(dvr_path),
+			 "/dev/dvb/adapter%d/dvr0", adapter);
+
+		dmx_fd = open(dmx_path, O_RDWR);
+		if (dmx_fd < 0) {
+			fprintf(stderr, "Cannot open %s: %s\n",
+				dmx_path, strerror(errno));
+			goto out;
 		}
 
-		if (status & FE_HAS_LOCK) {
-			if (!netif_up) {
-				printf("Locked.\n");
+		memset(&filter, 0, sizeof(filter));
+		filter.pid = 0x2000;
+		filter.input = DMX_IN_FRONTEND;
+		filter.output = DMX_OUT_TS_TAP;
+		filter.pes_type = DMX_PES_OTHER;
+		filter.flags = DMX_IMMEDIATE_START;
 
-				/* Bring up atsc netif */
-				if (find_netif(adapter) == 0) {
-					if (netif_set(netif_name, 1) == 0) {
-						printf("Interface %s up.\n",
-						       netif_name);
-						netif_up = 1;
-					} else {
-						fprintf(stderr,
-							"Failed to bring up %s: %s\n",
-							netif_name,
-							strerror(errno));
+		if (ioctl(dmx_fd, DMX_SET_PES_FILTER, &filter) < 0) {
+			perror("DMX_SET_PES_FILTER");
+			goto out;
+		}
+
+		dvr_fd = open(dvr_path, O_RDONLY);
+		if (dvr_fd < 0) {
+			fprintf(stderr, "Cannot open %s: %s\n",
+				dvr_path, strerror(errno));
+			goto out;
+		}
+	}
+
+	/* Main loop */
+	if (record) {
+		unsigned char buf[188 * 348];
+		struct pollfd pfd = { .fd = dvr_fd, .events = POLLIN };
+
+		while (running) {
+			if (poll(&pfd, 1, 100) > 0) {
+				ssize_t n = read(dvr_fd, buf, sizeof(buf));
+
+				if (n > 0) {
+					if (write(STDOUT_FILENO, buf, n) != n) {
+						perror("write stdout");
+						break;
 					}
-				} else {
-					fprintf(stderr,
-						"No atsc interface found for adapter %d\n",
-						adapter);
+				} else if (n < 0 && errno != EINTR &&
+					   errno != EAGAIN) {
+					perror("read dvr");
+					break;
 				}
 			}
-			usleep(500000);
-		} else {
-			if (netif_up) {
-				printf("Lock lost.\n");
-				netif_set(netif_name, 0);
-				netif_up = 0;
+		}
+	} else {
+		while (running) {
+			enum fe_status status = 0;
+
+			if (ioctl(fe_fd, FE_READ_STATUS, &status) < 0) {
+				perror("FE_READ_STATUS");
+				break;
 			}
-			usleep(100000);
+
+			if (status & FE_HAS_LOCK) {
+				fprintf(stderr, "Locked.\n");
+				usleep(500000);
+			} else {
+				fprintf(stderr, "Lock lost.\n");
+				usleep(100000);
+			}
 		}
 	}
 
 	/* Cleanup */
-	printf("\nStopping.\n");
-	if (netif_up)
-		netif_set(netif_name, 0);
+	fprintf(stderr, "\nStopping.\n");
 
 out:
-	if (sock_fd >= 0)
-		close(sock_fd);
+	if (dvr_fd >= 0)
+		close(dvr_fd);
+	if (dmx_fd >= 0)
+		close(dmx_fd);
 	close(fe_fd);
 	return 0;
 }
