@@ -17,41 +17,12 @@
 
 #include "cxd2878.h"
 #include "cxd2878_priv.h"
+#include "cxd2878_alp.h"
 #include "compat.h"
 
 static LIST_HEAD(cxdlist);
 
-struct cxd_base{
-	struct list_head cxdlist;
-	struct i2c_adapter *i2c;
-	struct mutex i2c_lock;
-	u8 adr;
-	u32 count;
-	struct cxd2878_config *config;
-
-};
-
-struct cxd2878_dev{
-	struct cxd_base *base;
-	bool warm; //start
-	struct dvb_frontend fe;
-	enum sony_dtv_system_t system;
-	enum sony_dtv_bandwidth_t bandwidth;
-	enum sony_demod_state_t state;
-	u8 slvt;  //for slvt addr;
-	u8 slvx;	//addr
-	u8 slvr;	//addr
-	u8 slvm;	//addr
-	u8 tuner_addr;
-	enum sony_demod_chip_id_t chipid;
-	enum sony_ascot3_chip_id_t tunerid;
-	struct sony_demod_iffreq_config_t iffreqConfig;
-
-	u32 atscNoSignalThresh;
-	u32 atscSignalThresh;
-	u32 tune_time;
-	enum sony_demod_output_atsc3_t atsc3Output;
- };
+/* struct cxd_base and cxd2878_dev are defined in cxd2878_priv.h */
 /* For CXD2856 or newer generation ICs */
 static	struct sony_ascot3_adjust_param_t g_param_table_ascot3i[SONY_ASCOT3_TV_SYSTEM_NUM] = {
 	/*
@@ -5125,6 +5096,17 @@ static int cxd2878_read_status(struct dvb_frontend *fe,
   	    	cxd2878_lock_flag(dev,0);//unlocked
 	  }
 
+	if (dev->alpdev) {
+		bool locked = !!(*status & FE_HAS_LOCK);
+		if (locked != dev->alp_carrier) {
+			if (locked)
+				netif_carrier_on(dev->alpdev);
+			else
+				netif_carrier_off(dev->alpdev);
+			dev->alp_carrier = locked;
+		}
+	}
+
 	/*rf signal*/
 	ret |= cxd2878_i2c_repeater(dev,1);
 	if(SONY_TUNER_IS_ASCOT3(dev->chipid))
@@ -5627,6 +5609,24 @@ static int cxd2878_read_ucblocks(struct dvb_frontend *fe,u32 *ucblocks)
 	return 0;
 }
 
+static int cxd2878_sleep_fe(struct dvb_frontend *fe)
+{
+	struct cxd2878_dev *dev = fe->demodulator_priv;
+
+	mutex_lock(&dev->base->i2c_lock);
+	cxd2878_sleep(dev);
+	mutex_unlock(&dev->base->i2c_lock);
+
+	dev->warm = 0;
+
+	if (dev->alpdev && dev->alp_carrier) {
+		netif_carrier_off(dev->alpdev);
+		dev->alp_carrier = false;
+	}
+
+	return 0;
+}
+
 static void cxd2878_release (struct dvb_frontend*fe)
 {
 	struct cxd2878_dev *dev = fe->demodulator_priv;
@@ -5669,6 +5669,7 @@ static const struct dvb_frontend_ops cxd2878_ops = {
 	},
 
 			.init 					= cxd2878_init,
+			.sleep				= cxd2878_sleep_fe,
 			.release			= cxd2878_release,
 			.set_frontend			= cxd2878_set_frontend,
 			.tune					= cxd2878_tune,

@@ -18,6 +18,7 @@
 #include <media/dvb_net.h>
 
 #include "cxd2878.h"
+#include "cxd2878_alp.h"
 #include "it930x_smartcard.h"
 
 /* -------- IT930x bridge constants -------- */
@@ -2192,6 +2193,17 @@ static int it930x_dvb_init(struct it930x_dev *dev)
 		if (ret)
 			goto err_dmxdev;
 
+		/* ALP virtual network adapter for ATSC 3.0 */
+		if (ife->fe) {
+			ret = cxd2878_alp_attach(ife->fe->demodulator_priv,
+						 &ife->demux.dmx, &ife->demux,
+						 &dev->intf->dev);
+			if (ret)
+				dev_warn(&dev->intf->dev,
+					 "ALP net attach failed for fe %d: %d\n",
+					 i, ret);
+		}
+
 		continue;
 
 	err_dmxdev:
@@ -2223,6 +2235,8 @@ err_unwind:
 	while (--i >= 0) {
 		struct it930x_fe_ctx *ife = &dev->fes[i];
 
+		if (ife->fe)
+			cxd2878_alp_detach(ife->fe->demodulator_priv);
 		dvb_net_release(&ife->dvbnet);
 		dvb_dmxdev_release(&ife->dmxdev);
 		dvb_dmx_release(&ife->demux);
@@ -2248,6 +2262,9 @@ static void it930x_dvb_exit(struct it930x_dev *dev)
 
 	for (i = dev->board->num_frontends - 1; i >= 0; i--) {
 		struct it930x_fe_ctx *ife = &dev->fes[i];
+
+		if (ife->fe)
+			cxd2878_alp_detach(ife->fe->demodulator_priv);
 
 		dvb_net_release(&ife->dvbnet);
 		dvb_dmxdev_release(&ife->dmxdev);

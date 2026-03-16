@@ -11,6 +11,7 @@
 
 #include "tbs5530.h"
 #include "cxd2878.h"
+#include "cxd2878_alp.h"
 #include "m88rs6060.h"
 
 #define tbs5530_READ_MSG 0
@@ -349,6 +350,16 @@ static int tbs5530_dvb_init(struct tbs5530_dev *dev)
 	if (ret)
 		goto err_dmxdev;
 
+	/* ALP virtual network adapter for ATSC 3.0 */
+	if (dev->fe_ter) {
+		ret = cxd2878_alp_attach(dev->fe_ter->demodulator_priv,
+					 &dev->demux.dmx, &dev->demux,
+					 &dev->udev->dev);
+		if (ret)
+			dev_warn(&dev->udev->dev,
+				 "ALP net attach failed: %d\n", ret);
+	}
+
 	return 0;
 
 err_dmxdev:
@@ -373,6 +384,9 @@ err_adapter:
 
 static void tbs5530_dvb_exit(struct tbs5530_dev *dev)
 {
+	if (dev->fe_ter)
+		cxd2878_alp_detach(dev->fe_ter->demodulator_priv);
+
 	dvb_net_release(&dev->dvb_net);
 	dvb_dmxdev_release(&dev->dmxdev);
 	dvb_dmx_release(&dev->demux);

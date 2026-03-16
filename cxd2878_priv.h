@@ -1,6 +1,14 @@
 #ifndef _CXD2878_PRIV_H_
 #define _CXD2878_PRIV_H_
 
+#include <linux/netdevice.h>
+#include <media/demux.h>
+#include <media/dvb_demux.h>
+#include <media/dvb_frontend.h>
+
+#define CXD2878_ALP_BUF_SIZE	16384
+#define CXD2878_ALP_SEG_BUF_SIZE 65536	/* max reassembled: 32 segs × 2047 */
+
 #define AUTO         (0xFF) /* For IF_OUT_SEL and AGC_SEL, it means that the value is desided by config flags. */
 								/* For RF_GAIN, it means that RF_GAIN_SEL(SubAddr:0x4E) = 1 */
 #define OFFSET(ofs)  ((u8)(ofs) & 0x1F)
@@ -313,5 +321,55 @@ struct sony_demod_alp_clk_configuration_t {
     u32 configJ83B_5_60;           /**< J.83B. 5.6Msps */
 } ;
 
+/* ── Device structures (shared between cxd2878_core.c and cxd2878_alp.c) ── */
+
+struct cxd_base {
+	struct list_head cxdlist;
+	struct i2c_adapter *i2c;
+	struct mutex i2c_lock;
+	u8 adr;
+	u32 count;
+	struct cxd2878_config *config;
+};
+
+struct cxd2878_dev {
+	struct cxd_base *base;
+	bool warm;
+	struct dvb_frontend fe;
+	enum sony_dtv_system_t system;
+	enum sony_dtv_bandwidth_t bandwidth;
+	enum sony_demod_state_t state;
+	u8 slvt;
+	u8 slvx;
+	u8 slvr;
+	u8 slvm;
+	u8 tuner_addr;
+	enum sony_demod_chip_id_t chipid;
+	enum sony_ascot3_chip_id_t tunerid;
+	struct sony_demod_iffreq_config_t iffreqConfig;
+
+	u32 atscNoSignalThresh;
+	u32 atscSignalThresh;
+	u32 tune_time;
+	enum sony_demod_output_atsc3_t atsc3Output;
+
+	/* ALP virtual network adapter */
+	struct net_device   *alpdev;
+	struct dmx_demux    *alp_demux;
+	struct dvb_demux    *alp_dvb_demux;
+	struct dmx_ts_feed  *alp_feed;
+	bool                alp_carrier;
+	u8                  alp_buf[CXD2878_ALP_BUF_SIZE];
+	u32                 alp_buf_len;
+	u32                 alp_expected_len;
+	bool                alp_active;
+
+	/* ALP segmentation reassembly (A/330 §5.1.2.2) */
+	u8                 *alp_seg_buf;      /* kmalloc'd, 65536 bytes */
+	u32                 alp_seg_len;      /* bytes accumulated */
+	u8                  alp_seg_type;     /* packet_type being reassembled */
+	u8                  alp_seg_next_sn;  /* expected next seg_SN */
+	bool                alp_seg_active;   /* reassembly in progress */
+};
 
 #endif
