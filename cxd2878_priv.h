@@ -19,7 +19,10 @@ struct cxd2878_alp_stats {
 	u64 unsupported_type;	/* ALP types 1-6 skipped */
 	u64 ext_hdr_skip;	/* header_mode=1 non-IPv4 skipped */
 	u64 seg_errors;		/* segmentation sequence/overflow errors */
-	u64 frame_errors;	/* ALP length/parse mismatches */
+	u64 frame_err_single;	/* PC=0 single packet length mismatch */
+	u64 frame_err_seg;	/* segmented packet length mismatch */
+	u64 frame_err_concat;	/* concatenated packet length/parse error */
+	u64 frame_err_pusi;	/* PUSI completion delivered short buffer */
 	u64 short_packets;	/* packets too short to parse */
 	u64 ts_null_skip;	/* null TS packets skipped */
 	u64 ts_reassembled;	/* TS packets processed */

@@ -35,7 +35,10 @@ static const char alp_stat_names[][ETH_GSTRING_LEN] = {
 	"alp_unsupported_type",
 	"alp_ext_hdr_skip",
 	"alp_seg_errors",
-	"alp_frame_errors",
+	"alp_frame_err_single",
+	"alp_frame_err_seg",
+	"alp_frame_err_concat",
+	"alp_frame_err_pusi",
 	"alp_short_packets",
 	"alp_ts_null_skip",
 	"alp_ts_reassembled",
@@ -158,7 +161,7 @@ static void alp_handle_segmented(struct cxd2878_dev *dev, u8 packet_type,
 	if (hef) hdr_size += 1;  /* header_extension: skip 1 byte (min) */
 
 	if (alp_length + 2 > len) {
-		dev->alp_stats.frame_errors++;
+		dev->alp_stats.frame_err_seg++;
 		alp_seg_reset(dev);
 		return;
 	}
@@ -241,7 +244,7 @@ static void alp_handle_concatenated(struct cxd2878_dev *dev, u8 packet_type,
 		u32 bit_off  = hdr_bits_offset % 8;
 
 		if (byte_off + 2 > len) {
-			dev->alp_stats.frame_errors++;
+			dev->alp_stats.frame_err_concat++;
 			return;
 		}
 
@@ -275,13 +278,13 @@ static void alp_handle_concatenated(struct cxd2878_dev *dev, u8 packet_type,
 	u32 data_len;
 
 	if (total_payload < addl_hdr_size) {
-		dev->alp_stats.frame_errors++;
+		dev->alp_stats.frame_err_concat++;
 		return;
 	}
 	data_len = total_payload - addl_hdr_size;
 
 	if (hdr_size + data_len > len) {
-		dev->alp_stats.frame_errors++;
+		dev->alp_stats.frame_err_concat++;
 		return;
 	}
 
@@ -297,14 +300,14 @@ static void alp_handle_concatenated(struct cxd2878_dev *dev, u8 packet_type,
 		} else {
 			/* Last packet: remaining bytes */
 			if (data_len < sum_comp) {
-				dev->alp_stats.frame_errors++;
+				dev->alp_stats.frame_err_concat++;
 				return;
 			}
 			pkt_len = data_len - sum_comp;
 		}
 
 		if (offset + pkt_len > len) {
-			dev->alp_stats.frame_errors++;
+			dev->alp_stats.frame_err_concat++;
 			return;
 		}
 
@@ -367,7 +370,7 @@ static void cxd2878_alp_process(struct cxd2878_dev *dev, const u8 *buf, u32 len)
 	}
 
 	if (alp_length + 2 > len) {
-		dev->alp_stats.frame_errors++;
+		dev->alp_stats.frame_err_single++;
 		return;
 	}
 
@@ -383,20 +386,27 @@ static void alp_check_complete(struct cxd2878_dev *dev)
 {
 	while (dev->alp_active) {
 		if (dev->alp_expected_len == 0 && dev->alp_buf_len >= 2) {
-			u8 pc = (dev->alp_buf[0] >> 4) & 1;
-			u16 length = ((dev->alp_buf[0] & 0x07) << 8) |
-				     dev->alp_buf[1];
+			u8 b0 = dev->alp_buf[0];
+			u8 pc = (b0 >> 4) & 1;
+			u16 length = ((b0 & 0x07) << 8) | dev->alp_buf[1];
+			bool need_msb = false;
 
-			if (pc && (dev->alp_buf[0] & 0x08)) {
-				/* PC=1, S/C=1 (concatenation): need byte 2
-				 * for length_MSB */
+			if (pc && (b0 & 0x08)) {
+				/* PC=1, S/C=1 (concatenation) */
+				need_msb = true;
+			} else if (!pc && (b0 & 0x08)) {
+				/* PC=0, HM=1 (single packet with addl hdr) */
+				need_msb = true;
+			}
+
+			if (need_msb) {
 				if (dev->alp_buf_len < 3)
 					break;
-				u8 length_msb = (dev->alp_buf[2] >> 4) & 0x0F;
+				u8 msb = (dev->alp_buf[2] >> 4) & 0x1F;
 				dev->alp_expected_len =
-					((length_msb << 11) | length) + 2;
+					((msb << 11) | length) + 2;
 			} else {
-				/* PC=0 or PC=1,S/C=0: length fits in 11 bits */
+				/* PC=0/HM=0 or PC=1/S/C=0 */
 				dev->alp_expected_len = length + 2;
 			}
 		}
@@ -454,9 +464,12 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 		/* Complete previous ALP packet with tail data */
 		if (dev->alp_active && pointer > 0) {
 			alp_ctx_append(dev, payload + 1, pointer);
-			if (dev->alp_buf_len > 0)
-				cxd2878_alp_process(dev, dev->alp_buf,
-						    dev->alp_buf_len);
+			if (dev->alp_buf_len > 0) {
+				dev->alp_expected_len = 0; /* force recalc */
+				alp_check_complete(dev);
+				if (dev->alp_active)
+					dev->alp_stats.frame_err_pusi++;
+			}
 		}
 
 		/* Always reset before starting new ALP data */
@@ -602,7 +615,10 @@ static void cxd2878_alp_get_ethtool_stats(struct net_device *netdev,
 	*data++ = s->unsupported_type;
 	*data++ = s->ext_hdr_skip;
 	*data++ = s->seg_errors;
-	*data++ = s->frame_errors;
+	*data++ = s->frame_err_single;
+	*data++ = s->frame_err_seg;
+	*data++ = s->frame_err_concat;
+	*data++ = s->frame_err_pusi;
 	*data++ = s->short_packets;
 	*data++ = s->ts_null_skip;
 	*data++ = s->ts_reassembled;

@@ -1223,7 +1223,11 @@ static void it930x_urb_complete(struct urb *urb)
 		break;
 	}
 
-	usb_submit_urb(urb, GFP_ATOMIC);
+	if (usb_submit_urb(urb, GFP_ATOMIC)) {
+		dev->urb_complete_err++;
+		dev_err_ratelimited(&dev->intf->dev,
+				    "URB resubmit failed\n");
+	}
 }
 
 static int it930x_start_streaming(struct it930x_dev *dev)
