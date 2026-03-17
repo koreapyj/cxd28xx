@@ -219,6 +219,8 @@ int main(int argc, char **argv)
 			}
 		}
 	} else {
+		time_t last_stats = 0;
+
 		while (running) {
 			enum fe_status status = 0;
 
@@ -228,10 +230,43 @@ int main(int argc, char **argv)
 			}
 
 			if (status & FE_HAS_LOCK) {
-				fprintf(stderr, "Locked.\n");
+				time_t now = time(NULL);
+
+				if (now - last_stats >= 5) {
+					struct dtv_property props[3];
+					struct dtv_properties cmd;
+
+					memset(props, 0, sizeof(props));
+					props[0].cmd = DTV_STAT_SIGNAL_STRENGTH;
+					props[1].cmd = DTV_STAT_CNR;
+					props[2].cmd = DTV_STAT_POST_ERROR_BIT_COUNT;
+					cmd.num = 3;
+					cmd.props = props;
+
+					if (ioctl(fe_fd, FE_GET_PROPERTY, &cmd) == 0) {
+						fprintf(stderr, "Lock | ");
+						if (props[0].u.st.len > 0 &&
+						    props[0].u.st.stat[0].scale == FE_SCALE_DECIBEL)
+							fprintf(stderr, "Sig: %.1f dBm ",
+								props[0].u.st.stat[0].svalue / 1000.0);
+						if (props[1].u.st.len > 0 &&
+						    props[1].u.st.stat[0].scale == FE_SCALE_DECIBEL)
+							fprintf(stderr, "SNR: %.1f dB ",
+								props[1].u.st.stat[0].svalue / 1000.0);
+						if (props[2].u.st.len > 0 &&
+						    props[2].u.st.stat[0].scale == FE_SCALE_COUNTER)
+							fprintf(stderr, "BER: %llu ",
+								props[2].u.st.stat[0].uvalue);
+						fprintf(stderr, "\n");
+					} else {
+						fprintf(stderr, "Locked.\n");
+					}
+					last_stats = now;
+				}
 				usleep(500000);
 			} else {
 				fprintf(stderr, "Lock lost.\n");
+				last_stats = 0;
 				usleep(100000);
 			}
 		}
