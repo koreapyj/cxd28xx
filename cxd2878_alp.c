@@ -12,6 +12,7 @@
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
 #include <linux/skbuff.h>
+#include <linux/ethtool.h>
 #include <media/dvb_demux.h>
 
 #include "cxd2878.h"
@@ -22,6 +23,27 @@
 struct cxd2878_alp_priv {
 	struct cxd2878_dev *dev;
 };
+
+/* ── Ethtool statistics ────────────────────────────────────────────── */
+
+static const char alp_stat_names[][ETH_GSTRING_LEN] = {
+	"alp_ip_packets",
+	"alp_ip_bytes",
+	"alp_ts_packets",
+	"alp_seg_completed",
+	"alp_concat_delivered",
+	"alp_unsupported_type",
+	"alp_ext_hdr_skip",
+	"alp_seg_errors",
+	"alp_frame_errors",
+	"alp_short_packets",
+	"alp_ts_null_skip",
+	"alp_ts_reassembled",
+	"alp_skb_alloc_fail",
+	"alp_netif_rx_fail",
+};
+
+#define ALP_STAT_COUNT ARRAY_SIZE(alp_stat_names)
 
 /* ── ALP reassembly helpers ────────────────────────────────────────── */
 
@@ -35,8 +57,7 @@ static void alp_ctx_reset(struct cxd2878_dev *dev)
 static int alp_ctx_append(struct cxd2878_dev *dev, const u8 *data, u32 len)
 {
 	if (dev->alp_buf_len + len > CXD2878_ALP_BUF_SIZE) {
-		if (dev->alpdev)
-			dev->alpdev->stats.rx_over_errors++;
+		dev->alp_stats.seg_errors++;
 		alp_ctx_reset(dev);
 		return -1;
 	}
@@ -55,13 +76,13 @@ static void alp_deliver_ipv4(struct cxd2878_dev *dev,
 	if (!dev->alpdev || !netif_running(dev->alpdev))
 		return;
 	if (len < 20) {
-		dev->alpdev->stats.rx_length_errors++;
+		dev->alp_stats.short_packets++;
 		return;
 	}
 
 	skb = dev_alloc_skb(len + NET_IP_ALIGN);
 	if (!skb) {
-		dev->alpdev->stats.rx_dropped++;
+		dev->alp_stats.skb_alloc_fail++;
 		return;
 	}
 	skb_reserve(skb, NET_IP_ALIGN);
@@ -72,7 +93,10 @@ static void alp_deliver_ipv4(struct cxd2878_dev *dev,
 	if (netif_rx(skb) == NET_RX_SUCCESS) {
 		dev->alpdev->stats.rx_packets++;
 		dev->alpdev->stats.rx_bytes += len;
+		dev->alp_stats.ip_packets++;
+		dev->alp_stats.ip_bytes += len;
 	} else {
+		dev->alp_stats.netif_rx_fail++;
 		dev->alpdev->stats.rx_dropped++;
 	}
 }
@@ -86,13 +110,14 @@ static void alp_dispatch(struct cxd2878_dev *dev, u8 packet_type,
 		alp_deliver_ipv4(dev, payload, payload_len);
 		break;
 	case ALP_TYPE_MPEG2_TS:
-		if (dev->alp_dvb_demux && payload_len >= 188)
+		if (dev->alp_dvb_demux && payload_len >= 188) {
 			dvb_dmx_swfilter(dev->alp_dvb_demux, payload,
 					 payload_len);
+			dev->alp_stats.ts_packets++;
+		}
 		break;
 	default:
-		if (dev->alpdev)
-			dev->alpdev->stats.rx_dropped++;
+		dev->alp_stats.unsupported_type++;
 		break;
 	}
 }
@@ -116,7 +141,7 @@ static void alp_handle_segmented(struct cxd2878_dev *dev, u8 packet_type,
 	u16 payload_len;
 
 	if (len < 3) {
-		dev->alpdev->stats.rx_length_errors++;
+		dev->alp_stats.short_packets++;
 		return;
 	}
 
@@ -131,10 +156,9 @@ static void alp_handle_segmented(struct cxd2878_dev *dev, u8 packet_type,
 	hdr_size = 3;
 	if (sif) hdr_size += 1;  /* sub_stream_id */
 	if (hef) hdr_size += 1;  /* header_extension: skip 1 byte (min) */
-	/* Note: HEF can be variable length per §5.1.3.2; for now skip 1 byte */
 
 	if (alp_length + 2 > len) {
-		dev->alpdev->stats.rx_frame_errors++;
+		dev->alp_stats.frame_errors++;
 		alp_seg_reset(dev);
 		return;
 	}
@@ -152,7 +176,7 @@ static void alp_handle_segmented(struct cxd2878_dev *dev, u8 packet_type,
 		   seg_sn != dev->alp_seg_next_sn ||
 		   packet_type != dev->alp_seg_type) {
 		/* Out-of-order or type mismatch — discard */
-		dev->alpdev->stats.rx_frame_errors++;
+		dev->alp_stats.seg_errors++;
 		alp_seg_reset(dev);
 		return;
 	} else {
@@ -162,7 +186,7 @@ static void alp_handle_segmented(struct cxd2878_dev *dev, u8 packet_type,
 	/* Append segment payload */
 	if (!dev->alp_seg_buf ||
 	    dev->alp_seg_len + payload_len > CXD2878_ALP_SEG_BUF_SIZE) {
-		dev->alpdev->stats.rx_over_errors++;
+		dev->alp_stats.seg_errors++;
 		alp_seg_reset(dev);
 		return;
 	}
@@ -171,6 +195,7 @@ static void alp_handle_segmented(struct cxd2878_dev *dev, u8 packet_type,
 
 	if (lsi) {
 		/* Last segment — deliver reassembled packet */
+		dev->alp_stats.seg_completed++;
 		alp_dispatch(dev, dev->alp_seg_type,
 			     dev->alp_seg_buf, dev->alp_seg_len);
 		alp_seg_reset(dev);
@@ -185,12 +210,12 @@ static void alp_handle_concatenated(struct cxd2878_dev *dev, u8 packet_type,
 	u16 alp_length, total_payload;
 	u8 length_msb, count, sif;
 	u32 hdr_bits_offset, hdr_size;
-	u16 comp_len[9];  /* max 9 component_length fields (count=7 → 8 packets) */
+	u16 comp_len[9];  /* max 9 component_length fields */
 	u32 i, num_packets, offset;
 	u32 sum_comp;
 
 	if (len < 3) {
-		dev->alpdev->stats.rx_length_errors++;
+		dev->alp_stats.short_packets++;
 		return;
 	}
 
@@ -202,23 +227,21 @@ static void alp_handle_concatenated(struct cxd2878_dev *dev, u8 packet_type,
 	sif        =  buf[2]       & 1;
 
 	total_payload = (length_msb << 11) | alp_length;
-	num_packets = count + 2;  /* count = num_packets - 2 */
+	num_packets = count + 2;
 
 	/*
 	 * Component lengths: (count+1) × 12-bit fields starting at byte 3.
 	 * If (count+1) is odd, 4 stuffing bits follow.
 	 * Then optionally 1 byte SID if sif=1.
-	 *
-	 * Parse component_length fields from the bit stream.
 	 */
-	hdr_bits_offset = 24;  /* 3 bytes of base+additional so far */
+	hdr_bits_offset = 24;
 
 	for (i = 0; i < count + 1; i++) {
 		u32 byte_off = hdr_bits_offset / 8;
 		u32 bit_off  = hdr_bits_offset % 8;
 
 		if (byte_off + 2 > len) {
-			dev->alpdev->stats.rx_frame_errors++;
+			dev->alp_stats.frame_errors++;
 			return;
 		}
 
@@ -252,13 +275,13 @@ static void alp_handle_concatenated(struct cxd2878_dev *dev, u8 packet_type,
 	u32 data_len;
 
 	if (total_payload < addl_hdr_size) {
-		dev->alpdev->stats.rx_frame_errors++;
+		dev->alp_stats.frame_errors++;
 		return;
 	}
 	data_len = total_payload - addl_hdr_size;
 
 	if (hdr_size + data_len > len) {
-		dev->alpdev->stats.rx_frame_errors++;
+		dev->alp_stats.frame_errors++;
 		return;
 	}
 
@@ -274,17 +297,18 @@ static void alp_handle_concatenated(struct cxd2878_dev *dev, u8 packet_type,
 		} else {
 			/* Last packet: remaining bytes */
 			if (data_len < sum_comp) {
-				dev->alpdev->stats.rx_frame_errors++;
+				dev->alp_stats.frame_errors++;
 				return;
 			}
 			pkt_len = data_len - sum_comp;
 		}
 
 		if (offset + pkt_len > len) {
-			dev->alpdev->stats.rx_frame_errors++;
+			dev->alp_stats.frame_errors++;
 			return;
 		}
 
+		dev->alp_stats.concat_delivered++;
 		alp_dispatch(dev, packet_type, buf + offset, pkt_len);
 		offset += pkt_len;
 		sum_comp += pkt_len;
@@ -306,7 +330,7 @@ static void cxd2878_alp_process(struct cxd2878_dev *dev, const u8 *buf, u32 len)
 		return;
 
 	if (len < 2) {
-		dev->alpdev->stats.rx_length_errors++;
+		dev->alp_stats.short_packets++;
 		return;
 	}
 
@@ -335,7 +359,7 @@ static void cxd2878_alp_process(struct cxd2878_dev *dev, const u8 *buf, u32 len)
 			break;
 		default:
 			/* Signalling/control with extended headers -- skip */
-			dev->alpdev->stats.rx_missed_errors++;
+			dev->alp_stats.ext_hdr_skip++;
 			return;
 		}
 	} else {
@@ -343,7 +367,7 @@ static void cxd2878_alp_process(struct cxd2878_dev *dev, const u8 *buf, u32 len)
 	}
 
 	if (alp_length + 2 > len) {
-		dev->alpdev->stats.rx_frame_errors++;
+		dev->alp_stats.frame_errors++;
 		return;
 	}
 
@@ -410,8 +434,12 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 
 	/* Skip null packets (padding) */
 	pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
-	if (pid == 0x1FFF)
+	if (pid == 0x1FFF) {
+		dev->alp_stats.ts_null_skip++;
 		return;
+	}
+
+	dev->alp_stats.ts_reassembled++;
 
 	pusi = (pkt[1] >> 6) & 1;
 	payload = pkt + CXD2878_ALP_TS_HDR_SIZE;
@@ -506,6 +534,7 @@ static int cxd2878_alp_open(struct net_device *netdev)
 	dev->alp_feed = feed;
 	alp_ctx_reset(dev);
 	alp_seg_reset(dev);
+	memset(&dev->alp_stats, 0, sizeof(dev->alp_stats));
 
 	return 0;
 }
@@ -535,6 +564,61 @@ static netdev_tx_t cxd2878_alp_xmit(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 }
 
+/* ── Ethtool operations ───────────────────────────────────────────── */
+
+static void cxd2878_alp_get_drvinfo(struct net_device *netdev,
+				    struct ethtool_drvinfo *info)
+{
+	strscpy(info->driver, "cxd2878_alp", sizeof(info->driver));
+	strscpy(info->version, "1.0", sizeof(info->version));
+}
+
+static int cxd2878_alp_get_sset_count(struct net_device *netdev, int sset)
+{
+	if (sset == ETH_SS_STATS)
+		return ALP_STAT_COUNT;
+	return -EOPNOTSUPP;
+}
+
+static void cxd2878_alp_get_strings(struct net_device *netdev,
+				    u32 sset, u8 *data)
+{
+	if (sset == ETH_SS_STATS)
+		memcpy(data, alp_stat_names, sizeof(alp_stat_names));
+}
+
+static void cxd2878_alp_get_ethtool_stats(struct net_device *netdev,
+					  struct ethtool_stats *stats,
+					  u64 *data)
+{
+	struct cxd2878_alp_priv *priv = netdev_priv(netdev);
+	struct cxd2878_alp_stats *s = &priv->dev->alp_stats;
+
+	*data++ = s->ip_packets;
+	*data++ = s->ip_bytes;
+	*data++ = s->ts_packets;
+	*data++ = s->seg_completed;
+	*data++ = s->concat_delivered;
+	*data++ = s->unsupported_type;
+	*data++ = s->ext_hdr_skip;
+	*data++ = s->seg_errors;
+	*data++ = s->frame_errors;
+	*data++ = s->short_packets;
+	*data++ = s->ts_null_skip;
+	*data++ = s->ts_reassembled;
+	*data++ = s->skb_alloc_fail;
+	*data++ = s->netif_rx_fail;
+}
+
+static const struct ethtool_ops cxd2878_alp_ethtool_ops = {
+	.get_drvinfo		= cxd2878_alp_get_drvinfo,
+	.get_sset_count		= cxd2878_alp_get_sset_count,
+	.get_strings		= cxd2878_alp_get_strings,
+	.get_ethtool_stats	= cxd2878_alp_get_ethtool_stats,
+};
+
+/* ── Net device setup ──────────────────────────────────────────────── */
+
 static const struct net_device_ops cxd2878_alp_netdev_ops = {
 	.ndo_open	= cxd2878_alp_open,
 	.ndo_stop	= cxd2878_alp_stop,
@@ -551,6 +635,7 @@ static void cxd2878_alp_setup(struct net_device *netdev)
 	netdev->max_mtu		= 9000;
 	netdev->flags		= IFF_POINTOPOINT | IFF_NOARP | IFF_MULTICAST;
 	netdev->netdev_ops	= &cxd2878_alp_netdev_ops;
+	netdev->ethtool_ops	= &cxd2878_alp_ethtool_ops;
 	netdev->needs_free_netdev = true;
 }
 
@@ -580,6 +665,7 @@ int cxd2878_alp_attach(struct cxd2878_dev *dev, struct dmx_demux *demux,
 	dev->alp_feed = NULL;
 	dev->alp_carrier = false;
 	alp_ctx_reset(dev);
+	memset(&dev->alp_stats, 0, sizeof(dev->alp_stats));
 
 	dev->alp_seg_buf = kmalloc(CXD2878_ALP_SEG_BUF_SIZE, GFP_KERNEL);
 	if (!dev->alp_seg_buf) {

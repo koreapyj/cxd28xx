@@ -9,6 +9,24 @@
 #define CXD2878_ALP_BUF_SIZE	16384
 #define CXD2878_ALP_SEG_BUF_SIZE 65536	/* max reassembled: 32 segs × 2047 */
 
+/* Per-device ALP statistics exposed via ethtool -S */
+struct cxd2878_alp_stats {
+	u64 ip_packets;		/* IPv4 packets delivered to stack */
+	u64 ip_bytes;		/* IPv4 bytes delivered */
+	u64 ts_packets;		/* MPEG-2 TS packets routed to demux */
+	u64 seg_completed;	/* segmented packets reassembled */
+	u64 concat_delivered;	/* concatenated components delivered */
+	u64 unsupported_type;	/* ALP types 1-6 skipped */
+	u64 ext_hdr_skip;	/* header_mode=1 non-IPv4 skipped */
+	u64 seg_errors;		/* segmentation sequence/overflow errors */
+	u64 frame_errors;	/* ALP length/parse mismatches */
+	u64 short_packets;	/* packets too short to parse */
+	u64 ts_null_skip;	/* null TS packets skipped */
+	u64 ts_reassembled;	/* TS packets processed */
+	u64 skb_alloc_fail;	/* skb allocation failures */
+	u64 netif_rx_fail;	/* netif_rx delivery failures */
+};
+
 #define AUTO         (0xFF) /* For IF_OUT_SEL and AGC_SEL, it means that the value is desided by config flags. */
 								/* For RF_GAIN, it means that RF_GAIN_SEL(SubAddr:0x4E) = 1 */
 #define OFFSET(ofs)  ((u8)(ofs) & 0x1F)
@@ -370,6 +388,9 @@ struct cxd2878_dev {
 	u8                  alp_seg_type;     /* packet_type being reassembled */
 	u8                  alp_seg_next_sn;  /* expected next seg_SN */
 	bool                alp_seg_active;   /* reassembly in progress */
+
+	/* ALP ethtool statistics */
+	struct cxd2878_alp_stats alp_stats;
 };
 
 #endif
