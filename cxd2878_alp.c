@@ -454,12 +454,9 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 	if (pkt[0] != 0x47)
 		return;
 
-	/* TEI — transport error, reset reassembly */
-	if (pkt[1] & 0x80) {
+	/* TEI — count but process normally (ALP-div-TS TEI is not reliable) */
+	if (pkt[1] & 0x80)
 		dev->alp_stats.ts_tei++;
-		alp_ctx_reset(dev);
-		return;
-	}
 
 	/* Skip null packets (padding) */
 	pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
@@ -475,10 +472,8 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 
 	if (pusi) {
 		pointer = payload[0];
-		if (pointer > CXD2878_ALP_TS_PAYLOAD - 1) {
-			alp_ctx_reset(dev);
+		if (pointer > CXD2878_ALP_TS_PAYLOAD - 1)
 			return;
-		}
 
 		/* Complete previous ALP packet with tail data */
 		if (dev->alp_active && pointer > 0) {
