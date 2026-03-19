@@ -28,6 +28,7 @@ struct cxd2878_alp_stats {
 	u64 ts_sync_miss;	/* TS packets with bad sync byte */
 	u64 ts_tei;		/* TS packets with TEI set */
 	u64 ts_reassembled;	/* TS packets processed */
+	u64 raw_bytes_in;	/* total bytes into alp_feed_raw */
 	u64 skb_alloc_fail;	/* skb allocation failures */
 	u64 netif_rx_fail;	/* netif_rx delivery failures */
 };

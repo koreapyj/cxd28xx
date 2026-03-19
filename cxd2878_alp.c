@@ -44,6 +44,7 @@ static const char alp_stat_names[][ETH_GSTRING_LEN] = {
 	"alp_ts_sync_miss",
 	"alp_ts_tei",
 	"alp_ts_reassembled",
+	"alp_raw_bytes_in",
 	"alp_skb_alloc_fail",
 	"alp_netif_rx_fail",
 };
@@ -391,19 +392,31 @@ static void alp_check_complete(struct cxd2878_dev *dev)
 			u8 b0 = dev->alp_buf[0];
 			u8 pc = (b0 >> 4) & 1;
 			u16 length = ((b0 & 0x07) << 8) | dev->alp_buf[1];
-			bool need_msb = false;
 
 			if (pc && (b0 & 0x08)) {
-				/* PC=1, S/C=1 (concatenation) */
-				need_msb = true;
-			}
-
-			if (need_msb) {
+				/* PC=1, S/C=1 (concatenation): 4-bit MSB */
 				if (dev->alp_buf_len < 3)
 					break;
-				u8 msb = (dev->alp_buf[2] >> 4) & 0x1F;
+				u8 msb = (dev->alp_buf[2] >> 4) & 0x0F;
 				dev->alp_expected_len =
 					((msb << 11) | length) + 2;
+			} else if (!pc && (b0 & 0x08)) {
+				/* PC=0, HM=1: additional header + optional SIF/HEF */
+				if (dev->alp_buf_len < 3)
+					break;
+				u8 addl = dev->alp_buf[2];
+				u8 msb = (addl >> 3) & 0x1F;
+				u8 sif = (addl >> 1) & 1;
+				u8 hef = addl & 1;
+				u32 full_length = ((u32)msb << 11) | length;
+				u32 hdr = 3 + (sif ? 1 : 0);
+				if (hef) {
+					if (dev->alp_buf_len < hdr + 2)
+						break;
+					u8 ext_len_m1 = dev->alp_buf[hdr + 1];
+					hdr += 2 + ext_len_m1 + 1;
+				}
+				dev->alp_expected_len = hdr + full_length;
 			} else {
 				/* PC=0/HM=0 or PC=1/S/C=0 */
 				dev->alp_expected_len = length + 2;
@@ -504,6 +517,8 @@ void cxd2878_alp_feed_raw(struct cxd2878_dev *dev, const u8 *buf, u32 len)
 
 	if (!dev->alpdev || !dev->alp_feed)
 		return;
+
+	dev->alp_stats.raw_bytes_in += len;
 
 	for (pos = 0; pos + 188 <= len; pos += 188) {
 		if (buf[pos] == 0x47)
@@ -648,6 +663,7 @@ static void cxd2878_alp_get_ethtool_stats(struct net_device *netdev,
 	*data++ = s->ts_sync_miss;
 	*data++ = s->ts_tei;
 	*data++ = s->ts_reassembled;
+	*data++ = s->raw_bytes_in;
 	*data++ = s->skb_alloc_fail;
 	*data++ = s->netif_rx_fail;
 }
