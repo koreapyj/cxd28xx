@@ -18,6 +18,7 @@
 #include <media/dvb_net.h>
 
 #include "cxd2878.h"
+#include "cxd2878_priv.h"
 #include "cxd2878_alp.h"
 #include "it930x_smartcard.h"
 
@@ -1168,6 +1169,14 @@ static void it930x_ts_route(struct it930x_dev *dev, u8 *buf, u32 len)
 
 	/* Fast path: single frontend, standard 0x47 sync */
 	if (dev->board->num_frontends == 1) {
+		if (dev->fes[0].fe) {
+			struct cxd2878_dev *cxd = dev->fes[0].fe->demodulator_priv;
+
+			if (cxd && cxd->alp_feed) {
+				cxd2878_alp_feed_raw(cxd, buf, len);
+				return;
+			}
+		}
 		dvb_dmx_swfilter(&dev->fes[0].demux, buf, len);
 		return;
 	}

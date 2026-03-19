@@ -27,5 +27,6 @@ struct dvb_demux;
 int  cxd2878_alp_attach(struct cxd2878_dev *dev, struct dmx_demux *demux,
 			struct dvb_demux *dvb_demux, struct device *parent);
 void cxd2878_alp_detach(struct cxd2878_dev *dev);
+void cxd2878_alp_feed_raw(struct cxd2878_dev *dev, const u8 *buf, u32 len);
 
 #endif /* _CXD2878_ALP_H_ */

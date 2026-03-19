@@ -41,6 +41,8 @@ static const char alp_stat_names[][ETH_GSTRING_LEN] = {
 	"alp_frame_err_pusi",
 	"alp_short_packets",
 	"alp_ts_null_skip",
+	"alp_ts_sync_miss",
+	"alp_ts_tei",
 	"alp_ts_reassembled",
 	"alp_skb_alloc_fail",
 	"alp_netif_rx_fail",
@@ -394,9 +396,6 @@ static void alp_check_complete(struct cxd2878_dev *dev)
 			if (pc && (b0 & 0x08)) {
 				/* PC=1, S/C=1 (concatenation) */
 				need_msb = true;
-			} else if (!pc && (b0 & 0x08)) {
-				/* PC=0, HM=1 (single packet with addl hdr) */
-				need_msb = true;
 			}
 
 			if (need_msb) {
@@ -441,6 +440,13 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 
 	if (pkt[0] != 0x47)
 		return;
+
+	/* TEI — transport error, reset reassembly */
+	if (pkt[1] & 0x80) {
+		dev->alp_stats.ts_tei++;
+		alp_ctx_reset(dev);
+		return;
+	}
 
 	/* Skip null packets (padding) */
 	pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
@@ -490,7 +496,25 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 	}
 }
 
-/* ── DVB demux TS feed callback ────────────────────────────────────── */
+/* ── Direct raw buffer feed (bypasses dvb_dmx_swfilter) ────────────── */
+
+void cxd2878_alp_feed_raw(struct cxd2878_dev *dev, const u8 *buf, u32 len)
+{
+	u32 pos;
+
+	if (!dev->alpdev || !dev->alp_feed)
+		return;
+
+	for (pos = 0; pos + 188 <= len; pos += 188) {
+		if (buf[pos] == 0x47)
+			cxd2878_alp_process_ts(dev, buf + pos);
+		else
+			dev->alp_stats.ts_sync_miss++;
+	}
+}
+EXPORT_SYMBOL_GPL(cxd2878_alp_feed_raw);
+
+/* ── DVB demux TS feed callback (fallback when no direct feed) ─────── */
 
 static int cxd2878_alp_ts_cb(const u8 *buf1, size_t len1,
 			     const u8 *buf2, size_t len2,
@@ -621,6 +645,8 @@ static void cxd2878_alp_get_ethtool_stats(struct net_device *netdev,
 	*data++ = s->frame_err_pusi;
 	*data++ = s->short_packets;
 	*data++ = s->ts_null_skip;
+	*data++ = s->ts_sync_miss;
+	*data++ = s->ts_tei;
 	*data++ = s->ts_reassembled;
 	*data++ = s->skb_alloc_fail;
 	*data++ = s->netif_rx_fail;
