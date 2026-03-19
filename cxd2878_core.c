@@ -4817,14 +4817,16 @@ static int cxd2878_init(struct dvb_frontend *fe)
 		else
 			msleep(21);
 
-		if (dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802) {
-			u8 data[] = {0x00, 0x00, 0x00, 0x00};
+		/* Why ATSC 3 works only when commented out? */
+		// if (dev->chipid == SONY_DEMOD_CHIP_ID_CXD6802) {
+		// 	u8 data[] = {0x00, 0x00, 0x00, 0x00};
 
-            /* Set SLV-T Bank : 0x9C */
-			cxd2878_wr(dev,dev->slvt,0x00,0x9C);
+        //     /* Set SLV-T Bank : 0x9C */
+		// 	cxd2878_wr(dev,dev->slvt,0x00,0x9C);
 
-			cxd2878_wrm(dev,dev->slvt,0x10,data,4);
-		} else if(SONY_TUNER_IS_FRIEA(dev->chipid)){
+		// 	cxd2878_wrm(dev,dev->slvt,0x10,data,4);
+		// } else
+		if(SONY_TUNER_IS_FRIEA(dev->chipid)){
 			cxd2878_wr(dev,dev->slvt,0x00,0x95);
 			cxd2878_wr(dev,dev->slvt,0x23,0x03);
 		}
@@ -5086,7 +5088,6 @@ static int cxd2878_read_status(struct dvb_frontend *fe,
 			goto err;
 	}
 
-//	printk("syncstat=0x%x ,tslockstat=0x%x,unlockdetected =0x%x\n",syncstat ,tslockstat,unlockdetected);
 	//lock flag
 
 	   if(dev->base->config->lock_flag){

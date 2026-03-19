@@ -13,7 +13,7 @@
 #include "compat.h"
 
 #define NUM_URBS	8
-#define URB_BUF_SIZE	(188 * 348)
+#define URB_BUF_SIZE	65536
 
 struct tbs5530_dev {
 	struct usb_device *udev;
@@ -40,6 +40,10 @@ struct tbs5530_dev {
 	struct urb *urbs[NUM_URBS];
 	u8 *urb_bufs[NUM_URBS];
 	bool streaming;
+	unsigned long urb_complete_ok;
+	unsigned long urb_complete_err;
+	unsigned long urb_complete_empty;
+	u64 urb_bytes_total;
 };
 
 #endif

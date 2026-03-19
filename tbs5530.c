@@ -113,18 +113,23 @@ static void tbs5530_urb_complete(struct urb *urb)
 
 	switch (urb->status) {
 	case 0:
+		if (urb->actual_length > 0) {
+			dvb_dmx_swfilter(&dev->demux, urb->transfer_buffer,
+					 urb->actual_length);
+			dev->urb_complete_ok++;
+			dev->urb_bytes_total += urb->actual_length;
+		} else {
+			dev->urb_complete_empty++;
+		}
 		break;
 	case -ECONNRESET:
 	case -ENOENT:
 	case -ESHUTDOWN:
 		return;
 	default:
+		dev->urb_complete_err++;
 		goto resubmit;
 	}
-
-	if (urb->actual_length > 0)
-		dvb_dmx_swfilter(&dev->demux, urb->transfer_buffer,
-				 urb->actual_length);
 
 resubmit:
 	usb_submit_urb(urb, GFP_ATOMIC);
@@ -143,6 +148,13 @@ static int tbs5530_start_streaming(struct tbs5530_dev *dev)
 	tbs5530_op_rw(dev->udev, 0x8a, 0, 0, buf, 2, tbs5530_WRITE_MSG);
 
 	dev->streaming = true;
+	dev->urb_complete_ok = 0;
+	dev->urb_complete_err = 0;
+	dev->urb_complete_empty = 0;
+	dev->urb_bytes_total = 0;
+
+	dev_info(&dev->udev->dev, "TS streaming started, active_fe=%d\n",
+		 dev->active_fe);
 
 	for (i = 0; i < NUM_URBS; i++) {
 		usb_fill_bulk_urb(dev->urbs[i], dev->udev,
@@ -172,6 +184,11 @@ static void tbs5530_stop_streaming(struct tbs5530_dev *dev)
 
 	for (i = 0; i < NUM_URBS; i++)
 		usb_kill_urb(dev->urbs[i]);
+
+	dev_info(&dev->udev->dev,
+		 "TS streaming stopped: ok=%lu err=%lu empty=%lu bytes=%llu\n",
+		 dev->urb_complete_ok, dev->urb_complete_err,
+		 dev->urb_complete_empty, dev->urb_bytes_total);
 }
 
 /* DVB demux feed callbacks */
