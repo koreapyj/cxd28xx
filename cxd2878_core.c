@@ -5301,6 +5301,21 @@ static int cxd2878_read_status(struct dvb_frontend *fe,
 			tmp16 = tmp[0]<<8 |tmp[1];
 			snr = 100*(s32)sony_math_log10(tmp16) - 9031;
 		  	break;
+		  case SYS_ATSC3:
+			cxd2878_wr(dev,dev->slvt,0x00,0x90);
+			cxd2878_rdm(dev,dev->slvt,0x28,tmp1,3);
+			cxd2878_rdm(dev,dev->slvt,0x58,&data,1);
+			dcl_avgerr_fine = ((u32)tmp1[0]<<16)|((u32)tmp1[1]<<8)|tmp1[2];
+			if(data==0x00){
+				if(dcl_avgerr_fine>419404) dcl_avgerr_fine=419404;
+				snr = 10*10*((s32)sony_math_log10(dcl_avgerr_fine)-(s32)sony_math_log10(519913-dcl_avgerr_fine));
+				snr += 33800;
+			}else{
+				if(dcl_avgerr_fine>704089) dcl_avgerr_fine=704089;
+				snr = 10*10*((s32)sony_math_log10(dcl_avgerr_fine)-(s32)sony_math_log10(971204-dcl_avgerr_fine));
+				snr += 35800;
+			}
+			break;
 		default:
 			break;
 		}
@@ -5393,6 +5408,49 @@ static int cxd2878_read_status(struct dvb_frontend *fe,
 				else
 					per = 0;
 				break;
+			case SYS_ATSC3:
+			{
+				u8 bchdata[7],plpFecType,plpCr;
+				u32 n_bch,div;
+				static const u16 nBCHBitsLookup[2][12] = {
+					{2160,3240,4320,5400,6480,7560,8640,9720,10800,11880,12960,14040},
+					{8640,12960,17280,21600,25920,30240,34560,38880,43200,47520,51840,56160},
+				};
+				cxd2878_wr(dev,dev->slvt,0x00,0x94);
+				cxd2878_rdm(dev,dev->slvt,0x4A,bchdata,7);
+				period = (bchdata[0]>>4)&0x0F;
+				if(!(bchdata[3]&0x01))
+					break;
+				packeterr = ((bchdata[4]&0x3F)<<16)|(bchdata[5]<<8)|bchdata[6];
+				cxd2878_wr(dev,dev->slvt,0x00,0x93);
+				cxd2878_rdm(dev,dev->slvt,0x90,datapacketnum,2);
+				plpFecType = (datapacketnum[0]>>4)&0x0F;
+				cxd2878_rdm(dev,dev->slvt,0x94,datapacketnum,2);
+				plpCr = (datapacketnum[0]>>4)&0x0F;
+				if(plpFecType>1||plpCr>11)
+					break;
+				n_bch = nBCHBitsLookup[plpFecType][plpCr];
+				if(period>=6){
+					div = (1U<<(period-6))*(n_bch/40);
+					Q = (packeterr*625)/div;
+					R = (packeterr*625)%div;
+					R*=625;
+					Q = Q*625+R/div;
+					R = R%div;
+				}else{
+					div = (1U<<period)*(n_bch/40);
+					Q = (packeterr*1000)/div;
+					R = (packeterr*1000)%div;
+					R*=25000;
+					Q = Q*25000+R/div;
+					R = R%div;
+				}
+				if(R>=div/2)
+					per = Q+1;
+				else
+					per = Q;
+				break;
+			}
 				default:
 				break;
 				}
