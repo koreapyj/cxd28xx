@@ -49,8 +49,16 @@ static const char alp_stat_names[][ETH_GSTRING_LEN] = {
 	"alp_ip_bytes",
 	"alp_seg_completed",
 	"alp_concat_delivered",
-	"alp_unsupported_type",
-	"alp_ext_hdr_skip",
+	"alp_type_compressed_ip",
+	"alp_type_lls",
+	"alp_type_ext",
+	"alp_type_ts",
+	"alp_type_unknown",
+	"alp_ext_hdr_compressed_ip",
+	"alp_ext_hdr_lls",
+	"alp_ext_hdr_ext",
+	"alp_ext_hdr_ts",
+	"alp_ext_hdr_unknown",
 	"alp_seg_errors",
 	"alp_frame_err_single",
 	"alp_frame_err_seg",
@@ -104,8 +112,20 @@ static void alp_dispatch(struct alp_dev *alp, u8 packet_type,
 	case ALP_TYPE_IPV4:
 		alp_deliver_ipv4(alp, payload, payload_len);
 		break;
+	case ALP_TYPE_COMPRESSED_IP:
+		alp->stats.type_compressed_ip++;
+		break;
+	case ALP_TYPE_LLS:
+		alp->stats.type_lls++;
+		break;
+	case ALP_TYPE_TYPE_EXT:
+		alp->stats.type_ext++;
+		break;
+	case ALP_TYPE_MPEG2_TS:
+		alp->stats.type_ts++;
+		break;
 	default:
-		alp->stats.unsupported_type++;
+		alp->stats.type_unknown++;
 		break;
 	}
 }
@@ -325,9 +345,16 @@ void alp_process(struct alp_dev *alp, const u8 *buf, u32 len)
 		case ALP_TYPE_IPV4:
 			hdr_size = 3;
 			break;
+		case ALP_TYPE_COMPRESSED_IP:
+			alp->stats.ext_hdr_compressed_ip++; return;
+		case ALP_TYPE_LLS:
+			alp->stats.ext_hdr_lls++; return;
+		case ALP_TYPE_TYPE_EXT:
+			alp->stats.ext_hdr_ext++; return;
+		case ALP_TYPE_MPEG2_TS:
+			alp->stats.ext_hdr_ts++; return;
 		default:
-			alp->stats.ext_hdr_skip++;
-			return;
+			alp->stats.ext_hdr_unknown++; return;
 		}
 	} else {
 		hdr_size = 2;
@@ -414,8 +441,16 @@ static void alp_get_ethtool_stats(struct net_device *netdev,
 	*data++ = s->ip_bytes;
 	*data++ = s->seg_completed;
 	*data++ = s->concat_delivered;
-	*data++ = s->unsupported_type;
-	*data++ = s->ext_hdr_skip;
+	*data++ = s->type_compressed_ip;
+	*data++ = s->type_lls;
+	*data++ = s->type_ext;
+	*data++ = s->type_ts;
+	*data++ = s->type_unknown;
+	*data++ = s->ext_hdr_compressed_ip;
+	*data++ = s->ext_hdr_lls;
+	*data++ = s->ext_hdr_ext;
+	*data++ = s->ext_hdr_ts;
+	*data++ = s->ext_hdr_unknown;
 	*data++ = s->seg_errors;
 	*data++ = s->frame_err_single;
 	*data++ = s->frame_err_seg;

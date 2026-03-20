@@ -32,8 +32,16 @@ struct alp_stats {
 	u64 ip_bytes;		/* IPv4 bytes delivered */
 	u64 seg_completed;	/* segmented packets reassembled */
 	u64 concat_delivered;	/* concatenated components delivered */
-	u64 unsupported_type;	/* unsupported ALP types skipped */
-	u64 ext_hdr_skip;	/* header_mode=1 non-IPv4 skipped */
+	u64 type_compressed_ip;	/* type 2: compressed IP */
+	u64 type_lls;		/* type 4: link-layer signalling */
+	u64 type_ext;		/* type 6: type extension */
+	u64 type_ts;		/* type 7: MPEG-2 TS */
+	u64 type_unknown;	/* types 1, 3, 5: undefined */
+	u64 ext_hdr_compressed_ip; /* HM=1 type 2: compressed IP */
+	u64 ext_hdr_lls;	/* HM=1 type 4: link-layer signalling */
+	u64 ext_hdr_ext;	/* HM=1 type 6: type extension */
+	u64 ext_hdr_ts;		/* HM=1 type 7: MPEG-2 TS */
+	u64 ext_hdr_unknown;	/* HM=1 types 1, 3, 5: undefined */
 	u64 seg_errors;		/* segmentation sequence/overflow errors */
 	u64 frame_err_single;	/* PC=0 single packet length mismatch */
 	u64 frame_err_seg;	/* segmented packet length mismatch */
