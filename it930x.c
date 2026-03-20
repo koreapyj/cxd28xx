@@ -2695,7 +2695,7 @@ static const struct usb_device_id it930x_id_table[] = {
 	{ USB_DEVICE(0x23e2, 0x2b02), .driver_info = (kernel_ulong_t)
 	  &(const struct it930x_board_cfg){	/* Zenview HDTV Mate */
 		.name		= "Zenview HDTV Mate",
-		.fw_file	= "dvb-usb-it9303-01.fw",
+		.fw_file	= "dvb-usb-hdtvmate.fw",
 		.num_frontends	= 1,
 		.fe		= {
 			{ .ts_port = 0, .i2c_bus = 3,
