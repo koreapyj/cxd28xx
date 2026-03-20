@@ -17,6 +17,7 @@
 
 #include "cxd2878.h"
 #include "cxd2878_priv.h"
+#include "alp.h"
 #include "cxd2878_alp.h"
 #include "compat.h"
 
@@ -5097,13 +5098,14 @@ static int cxd2878_read_status(struct dvb_frontend *fe,
   	    	cxd2878_lock_flag(dev,0);//unlocked
 	  }
 
-	if (dev->alpdev) {
+	if (dev->alp) {
+		struct net_device *alpdev = alp_get_netdev(dev->alp);
 		bool locked = !!(*status & FE_HAS_LOCK);
-		if (locked != dev->alp_carrier) {
+		if (alpdev && locked != dev->alp_carrier) {
 			if (locked)
-				netif_carrier_on(dev->alpdev);
+				netif_carrier_on(alpdev);
 			else
-				netif_carrier_off(dev->alpdev);
+				netif_carrier_off(alpdev);
 			dev->alp_carrier = locked;
 		}
 	}
@@ -5678,8 +5680,10 @@ static int cxd2878_sleep_fe(struct dvb_frontend *fe)
 
 	dev->warm = 0;
 
-	if (dev->alpdev && dev->alp_carrier) {
-		netif_carrier_off(dev->alpdev);
+	if (dev->alp && dev->alp_carrier) {
+		struct net_device *alpdev = alp_get_netdev(dev->alp);
+		if (alpdev)
+			netif_carrier_off(alpdev);
 		dev->alp_carrier = false;
 	}
 

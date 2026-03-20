@@ -6,32 +6,7 @@
 #include <media/dvb_demux.h>
 #include <media/dvb_frontend.h>
 
-#define CXD2878_ALP_BUF_SIZE	16384
-#define CXD2878_ALP_SEG_BUF_SIZE 65536	/* max reassembled: 32 segs × 2047 */
-
-/* Per-device ALP statistics exposed via ethtool -S */
-struct cxd2878_alp_stats {
-	u64 ip_packets;		/* IPv4 packets delivered to stack */
-	u64 ip_bytes;		/* IPv4 bytes delivered */
-	u64 ts_packets;		/* MPEG-2 TS packets routed to demux */
-	u64 seg_completed;	/* segmented packets reassembled */
-	u64 concat_delivered;	/* concatenated components delivered */
-	u64 unsupported_type;	/* ALP types 1-6 skipped */
-	u64 ext_hdr_skip;	/* header_mode=1 non-IPv4 skipped */
-	u64 seg_errors;		/* segmentation sequence/overflow errors */
-	u64 frame_err_single;	/* PC=0 single packet length mismatch */
-	u64 frame_err_seg;	/* segmented packet length mismatch */
-	u64 frame_err_concat;	/* concatenated packet length/parse error */
-	u64 frame_err_pusi;	/* PUSI completion delivered short buffer */
-	u64 short_packets;	/* packets too short to parse */
-	u64 ts_null_skip;	/* null TS packets skipped */
-	u64 ts_sync_miss;	/* TS packets with bad sync byte */
-	u64 ts_tei;		/* TS packets with TEI set */
-	u64 ts_reassembled;	/* TS packets processed */
-	u64 raw_bytes_in;	/* total bytes into alp_feed_raw */
-	u64 skb_alloc_fail;	/* skb allocation failures */
-	u64 netif_rx_fail;	/* netif_rx delivery failures */
-};
+#include "cxd2878_alp.h"
 
 #define AUTO         (0xFF) /* For IF_OUT_SEL and AGC_SEL, it means that the value is desided by config flags. */
 								/* For RF_GAIN, it means that RF_GAIN_SEL(SubAddr:0x4E) = 1 */
@@ -378,25 +353,21 @@ struct cxd2878_dev {
 	enum sony_demod_output_atsc3_t atsc3Output;
 
 	/* ALP virtual network adapter */
-	struct net_device   *alpdev;
+	struct alp_dev      *alp;             /* generic ALP context (opaque) */
+	bool                alp_carrier;      /* carrier state tracking */
+
+	/* ALP-div-TS decap (device-specific) */
 	struct dmx_demux    *alp_demux;
 	struct dvb_demux    *alp_dvb_demux;
 	struct dmx_ts_feed  *alp_feed;
-	bool                alp_carrier;
 	u8                  alp_buf[CXD2878_ALP_BUF_SIZE];
 	u32                 alp_buf_len;
 	u32                 alp_expected_len;
 	bool                alp_active;
 
-	/* ALP segmentation reassembly (A/330 §5.1.2.2) */
-	u8                 *alp_seg_buf;      /* kmalloc'd, 65536 bytes */
-	u32                 alp_seg_len;      /* bytes accumulated */
-	u8                  alp_seg_type;     /* packet_type being reassembled */
-	u8                  alp_seg_next_sn;  /* expected next seg_SN */
-	bool                alp_seg_active;   /* reassembly in progress */
-
-	/* ALP ethtool statistics */
-	struct cxd2878_alp_stats alp_stats;
+	/* TS-level statistics */
+	struct cxd2878_alp_ts_stats alp_ts_stats;
+	struct device       *alp_sysfs_dev;   /* device for sysfs TS stats */
 };
 
 #endif

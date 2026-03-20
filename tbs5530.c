@@ -369,12 +369,18 @@ static int tbs5530_dvb_init(struct tbs5530_dev *dev)
 
 	/* ALP virtual network adapter for ATSC 3.0 */
 	if (dev->fe_ter) {
-		ret = cxd2878_alp_attach(dev->fe_ter->demodulator_priv,
+		struct cxd2878_dev *cxd = dev->fe_ter->demodulator_priv;
+
+		ret = cxd2878_alp_attach(cxd,
 					 &dev->demux.dmx, &dev->demux,
 					 &dev->udev->dev);
-		if (ret)
+		if (ret) {
 			dev_warn(&dev->udev->dev,
 				 "ALP net attach failed: %d\n", ret);
+		} else {
+			cxd2878_alp_register_sysfs(cxd,
+						   &dev->udev->dev);
+		}
 	}
 
 	return 0;
@@ -401,8 +407,11 @@ err_adapter:
 
 static void tbs5530_dvb_exit(struct tbs5530_dev *dev)
 {
-	if (dev->fe_ter)
-		cxd2878_alp_detach(dev->fe_ter->demodulator_priv);
+	if (dev->fe_ter) {
+		struct cxd2878_dev *cxd = dev->fe_ter->demodulator_priv;
+		cxd2878_alp_unregister_sysfs(cxd);
+		cxd2878_alp_detach(cxd);
+	}
 
 	dvb_net_release(&dev->dvb_net);
 	dvb_dmxdev_release(&dev->dmxdev);

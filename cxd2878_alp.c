@@ -1,57 +1,27 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * CXD2878 ALP (ATSC Link-layer Protocol) virtual network adapter
+ * CXD2878 ALP-div-TS decapsulation
  *
- * Receives ALP-div-TS from the DVB demux, reassembles ALP packets, and:
- *   - Type 0 (IPv4): injects into kernel network stack via netif_rx()
- *   - Type 7 (MPEG-2 TS): routes to dvb_dmx_swfilter() for DVB processing
+ * Extracts complete ALP packets from the CXD2878's proprietary
+ * ALP-div-TS output format (3-byte TS header, no CC) and feeds
+ * them to the generic ALP module for protocol-level processing.
  *
- * Reference: ATSC A/330 Link-Layer Protocol
+ * This layer handles:
+ *   - TS sync (0x47), null PID filtering, TEI counting
+ *   - PUSI / pointer-based ALP packet boundary detection
+ *   - Streaming buffer reassembly (alp_check_complete)
+ *   - DVB demux TS feed allocation
  */
 
 #include <linux/netdevice.h>
-#include <linux/if_arp.h>
-#include <linux/skbuff.h>
-#include <linux/ethtool.h>
 #include <media/dvb_demux.h>
 
+#include "alp.h"
 #include "cxd2878.h"
 #include "cxd2878_priv.h"
 #include "cxd2878_alp.h"
 
-/* ── Private data stored in net_device ─────────────────────────────── */
-struct cxd2878_alp_priv {
-	struct cxd2878_dev *dev;
-};
-
-/* ── Ethtool statistics ────────────────────────────────────────────── */
-
-static const char alp_stat_names[][ETH_GSTRING_LEN] = {
-	"alp_ip_packets",
-	"alp_ip_bytes",
-	"alp_ts_packets",
-	"alp_seg_completed",
-	"alp_concat_delivered",
-	"alp_unsupported_type",
-	"alp_ext_hdr_skip",
-	"alp_seg_errors",
-	"alp_frame_err_single",
-	"alp_frame_err_seg",
-	"alp_frame_err_concat",
-	"alp_frame_err_pusi",
-	"alp_short_packets",
-	"alp_ts_null_skip",
-	"alp_ts_sync_miss",
-	"alp_ts_tei",
-	"alp_ts_reassembled",
-	"alp_raw_bytes_in",
-	"alp_skb_alloc_fail",
-	"alp_netif_rx_fail",
-};
-
-#define ALP_STAT_COUNT ARRAY_SIZE(alp_stat_names)
-
-/* ── ALP reassembly helpers ────────────────────────────────────────── */
+/* ── TS reassembly helpers ─────────────────────────────────────────── */
 
 static void alp_ctx_reset(struct cxd2878_dev *dev)
 {
@@ -63,324 +33,13 @@ static void alp_ctx_reset(struct cxd2878_dev *dev)
 static int alp_ctx_append(struct cxd2878_dev *dev, const u8 *data, u32 len)
 {
 	if (dev->alp_buf_len + len > CXD2878_ALP_BUF_SIZE) {
-		dev->alp_stats.seg_errors++;
+		dev->alp_ts_stats.ts_overflow++;
 		alp_ctx_reset(dev);
 		return -1;
 	}
 	memcpy(dev->alp_buf + dev->alp_buf_len, data, len);
 	dev->alp_buf_len += len;
 	return 0;
-}
-
-/* ── ALP packet delivery helpers ───────────────────────────────────── */
-
-static void alp_deliver_ipv4(struct cxd2878_dev *dev,
-			     const u8 *data, u32 len)
-{
-	struct sk_buff *skb;
-
-	if (!dev->alpdev || !netif_running(dev->alpdev))
-		return;
-	if (len < 20) {
-		dev->alp_stats.short_packets++;
-		return;
-	}
-
-	skb = dev_alloc_skb(len + NET_IP_ALIGN);
-	if (!skb) {
-		dev->alp_stats.skb_alloc_fail++;
-		return;
-	}
-	skb_reserve(skb, NET_IP_ALIGN);
-	skb_put_data(skb, data, len);
-	skb->dev = dev->alpdev;
-	skb->protocol = htons(ETH_P_IP);
-	skb_reset_network_header(skb);
-	if (netif_rx(skb) == NET_RX_SUCCESS) {
-		dev->alpdev->stats.rx_packets++;
-		dev->alpdev->stats.rx_bytes += len;
-		dev->alp_stats.ip_packets++;
-		dev->alp_stats.ip_bytes += len;
-	} else {
-		dev->alp_stats.netif_rx_fail++;
-		dev->alpdev->stats.rx_dropped++;
-	}
-}
-
-/* Dispatch a single complete ALP payload by type */
-static void alp_dispatch(struct cxd2878_dev *dev, u8 packet_type,
-			 const u8 *payload, u32 payload_len)
-{
-	switch (packet_type) {
-	case ALP_TYPE_IPV4:
-		alp_deliver_ipv4(dev, payload, payload_len);
-		break;
-	case ALP_TYPE_MPEG2_TS:
-		if (dev->alp_dvb_demux && payload_len >= 188) {
-			dvb_dmx_swfilter(dev->alp_dvb_demux, payload,
-					 payload_len);
-			dev->alp_stats.ts_packets++;
-		}
-		break;
-	default:
-		dev->alp_stats.unsupported_type++;
-		break;
-	}
-}
-
-/* ── ALP segmentation reassembly (A/330 §5.1.2.2) ─────────────────── */
-
-static void alp_seg_reset(struct cxd2878_dev *dev)
-{
-	dev->alp_seg_len = 0;
-	dev->alp_seg_next_sn = 0;
-	dev->alp_seg_active = false;
-}
-
-static void alp_handle_segmented(struct cxd2878_dev *dev, u8 packet_type,
-				 const u8 *buf, u32 len)
-{
-	u16 alp_length;
-	u8 addhdr, seg_sn, lsi, sif, hef;
-	u32 hdr_size;
-	const u8 *payload;
-	u16 payload_len;
-
-	if (len < 3) {
-		dev->alp_stats.short_packets++;
-		return;
-	}
-
-	alp_length = ((buf[0] & 0x07) << 8) | buf[1];
-	addhdr = buf[2];
-	seg_sn = (addhdr >> 3) & 0x1F;
-	lsi    = (addhdr >> 2) & 1;
-	sif    = (addhdr >> 1) & 1;
-	hef    =  addhdr       & 1;
-
-	/* Header: 2 (base) + 1 (seg additional) + SIF + HEF(skip) */
-	hdr_size = 3;
-	if (sif) hdr_size += 1;  /* sub_stream_id */
-	if (hef) hdr_size += 1;  /* header_extension: skip 1 byte (min) */
-
-	if (alp_length + 2 > len) {
-		dev->alp_stats.frame_err_seg++;
-		alp_seg_reset(dev);
-		return;
-	}
-
-	payload = buf + hdr_size;
-	payload_len = alp_length - (hdr_size - 2);
-
-	if (seg_sn == 0) {
-		/* First segment — start new reassembly */
-		alp_seg_reset(dev);
-		dev->alp_seg_active = true;
-		dev->alp_seg_type = packet_type;
-		dev->alp_seg_next_sn = 1;
-	} else if (!dev->alp_seg_active ||
-		   seg_sn != dev->alp_seg_next_sn ||
-		   packet_type != dev->alp_seg_type) {
-		/* Out-of-order or type mismatch — discard */
-		dev->alp_stats.seg_errors++;
-		alp_seg_reset(dev);
-		return;
-	} else {
-		dev->alp_seg_next_sn = seg_sn + 1;
-	}
-
-	/* Append segment payload */
-	if (!dev->alp_seg_buf ||
-	    dev->alp_seg_len + payload_len > CXD2878_ALP_SEG_BUF_SIZE) {
-		dev->alp_stats.seg_errors++;
-		alp_seg_reset(dev);
-		return;
-	}
-	memcpy(dev->alp_seg_buf + dev->alp_seg_len, payload, payload_len);
-	dev->alp_seg_len += payload_len;
-
-	if (lsi) {
-		/* Last segment — deliver reassembled packet */
-		dev->alp_stats.seg_completed++;
-		alp_dispatch(dev, dev->alp_seg_type,
-			     dev->alp_seg_buf, dev->alp_seg_len);
-		alp_seg_reset(dev);
-	}
-}
-
-/* ── ALP concatenation (A/330 §5.1.2.3) ───────────────────────────── */
-
-static void alp_handle_concatenated(struct cxd2878_dev *dev, u8 packet_type,
-				    const u8 *buf, u32 len)
-{
-	u16 alp_length, total_payload;
-	u8 length_msb, count, sif;
-	u32 hdr_bits_offset, hdr_size;
-	u16 comp_len[9];  /* max 9 component_length fields */
-	u32 i, num_packets, offset;
-	u32 sum_comp;
-
-	if (len < 3) {
-		dev->alp_stats.short_packets++;
-		return;
-	}
-
-	alp_length = ((buf[0] & 0x07) << 8) | buf[1];
-
-	/* Additional header byte 2: length_MSB(4) | count(3) | SIF(1) */
-	length_msb = (buf[2] >> 4) & 0x0F;
-	count      = (buf[2] >> 1) & 0x07;
-	sif        =  buf[2]       & 1;
-
-	total_payload = (length_msb << 11) | alp_length;
-	num_packets = count + 2;
-
-	/*
-	 * Component lengths: (count+1) × 12-bit fields starting at byte 3.
-	 * If (count+1) is odd, 4 stuffing bits follow.
-	 * Then optionally 1 byte SID if sif=1.
-	 */
-	hdr_bits_offset = 24;
-
-	for (i = 0; i < count + 1; i++) {
-		u32 byte_off = hdr_bits_offset / 8;
-		u32 bit_off  = hdr_bits_offset % 8;
-
-		if (byte_off + 2 > len) {
-			dev->alp_stats.frame_err_concat++;
-			return;
-		}
-
-		/* Extract 12 bits starting at bit_off within buf[byte_off] */
-		if (bit_off <= 4) {
-			comp_len[i] = ((buf[byte_off] << 8) | buf[byte_off + 1])
-				>> (4 - bit_off);
-		} else {
-			comp_len[i] = ((buf[byte_off] << 16) |
-				       (buf[byte_off + 1] << 8) |
-				       buf[byte_off + 2])
-				>> (12 - (bit_off - 4));
-		}
-		comp_len[i] &= 0x0FFF;
-		hdr_bits_offset += 12;
-	}
-
-	/* Stuffing bits if (count+1) is odd (i.e. count is even) */
-	if ((count & 1) == 0)
-		hdr_bits_offset += 4;
-
-	hdr_size = (hdr_bits_offset + 7) / 8;
-	if (sif) hdr_size += 1;
-
-	/*
-	 * total_payload includes the additional header (everything after
-	 * the 2-byte base header). Subtract additional header size to get
-	 * the actual data length.
-	 */
-	u32 addl_hdr_size = hdr_size - 2;
-	u32 data_len;
-
-	if (total_payload < addl_hdr_size) {
-		dev->alp_stats.frame_err_concat++;
-		return;
-	}
-	data_len = total_payload - addl_hdr_size;
-
-	if (hdr_size + data_len > len) {
-		dev->alp_stats.frame_err_concat++;
-		return;
-	}
-
-	/* Deliver each concatenated component */
-	offset = hdr_size;
-	sum_comp = 0;
-
-	for (i = 0; i < num_packets; i++) {
-		u16 pkt_len;
-
-		if (i < count + 1) {
-			pkt_len = comp_len[i];
-		} else {
-			/* Last packet: remaining bytes */
-			if (data_len < sum_comp) {
-				dev->alp_stats.frame_err_concat++;
-				return;
-			}
-			pkt_len = data_len - sum_comp;
-		}
-
-		if (offset + pkt_len > len) {
-			dev->alp_stats.frame_err_concat++;
-			return;
-		}
-
-		dev->alp_stats.concat_delivered++;
-		alp_dispatch(dev, packet_type, buf + offset, pkt_len);
-		offset += pkt_len;
-		sum_comp += pkt_len;
-	}
-}
-
-/* ── ALP packet processing ─────────────────────────────────────────── */
-
-static void cxd2878_alp_process(struct cxd2878_dev *dev, const u8 *buf, u32 len)
-{
-	u8 packet_type;
-	u8 pc, header_mode;
-	u16 alp_length;
-	u32 hdr_size;
-	const u8 *payload;
-	u16 payload_len;
-
-	if (!dev->alpdev)
-		return;
-
-	if (len < 2) {
-		dev->alp_stats.short_packets++;
-		return;
-	}
-
-	packet_type = (buf[0] >> 5) & 0x07;
-	pc = (buf[0] >> 4) & 1;
-
-	if (pc) {
-		/* payload_configuration=1: segmented or concatenated */
-		u8 sc = (buf[0] >> 3) & 1;
-
-		if (sc == 0)
-			alp_handle_segmented(dev, packet_type, buf, len);
-		else
-			alp_handle_concatenated(dev, packet_type, buf, len);
-		return;
-	}
-
-	/* payload_configuration=0: single packet */
-	header_mode = (buf[0] >> 3) & 1;
-	alp_length = ((buf[0] & 0x07) << 8) | buf[1];
-
-	if (header_mode) {
-		switch (packet_type) {
-		case ALP_TYPE_IPV4:
-			hdr_size = 3;	/* 2-byte base + 1-byte additional */
-			break;
-		default:
-			/* Signalling/control with extended headers -- skip */
-			dev->alp_stats.ext_hdr_skip++;
-			return;
-		}
-	} else {
-		hdr_size = 2;
-	}
-
-	if (alp_length + 2 > len) {
-		dev->alp_stats.frame_err_single++;
-		return;
-	}
-
-	payload = buf + hdr_size;
-	payload_len = alp_length - (hdr_size - 2);
-
-	alp_dispatch(dev, packet_type, payload, payload_len);
 }
 
 /* ── ALP reassembly: check for complete packets in buffer ──────────── */
@@ -427,7 +86,8 @@ static void alp_check_complete(struct cxd2878_dev *dev)
 		    dev->alp_buf_len < dev->alp_expected_len)
 			break;
 
-		cxd2878_alp_process(dev, dev->alp_buf, dev->alp_expected_len);
+		/* Hand complete ALP packet to the generic module */
+		alp_process(dev->alp, dev->alp_buf, dev->alp_expected_len);
 
 		u32 leftover = dev->alp_buf_len - dev->alp_expected_len;
 		if (leftover > 0) {
@@ -456,16 +116,16 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 
 	/* TEI — count but process normally (ALP-div-TS TEI is not reliable) */
 	if (pkt[1] & 0x80)
-		dev->alp_stats.ts_tei++;
+		dev->alp_ts_stats.ts_tei++;
 
 	/* Skip null packets (padding) */
 	pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
 	if (pid == 0x1FFF) {
-		dev->alp_stats.ts_null_skip++;
+		dev->alp_ts_stats.ts_null_skip++;
 		return;
 	}
 
-	dev->alp_stats.ts_reassembled++;
+	dev->alp_ts_stats.ts_reassembled++;
 
 	pusi = (pkt[1] >> 6) & 1;
 	payload = pkt + CXD2878_ALP_TS_HDR_SIZE;
@@ -479,10 +139,10 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 		if (dev->alp_active && pointer > 0) {
 			alp_ctx_append(dev, payload + 1, pointer);
 			if (dev->alp_buf_len > 0) {
-				dev->alp_expected_len = 0; /* force recalc */
+				dev->alp_expected_len = 0;
 				alp_check_complete(dev);
 				if (dev->alp_active)
-					dev->alp_stats.frame_err_pusi++;
+					dev->alp_ts_stats.frame_err_pusi++;
 			}
 		}
 
@@ -511,27 +171,27 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 	}
 }
 
-/* ── Direct raw buffer feed (bypasses dvb_dmx_swfilter) ────────────── */
+/* ── Direct raw buffer feed ────────────────────────────────────────── */
 
 void cxd2878_alp_feed_raw(struct cxd2878_dev *dev, const u8 *buf, u32 len)
 {
 	u32 pos;
 
-	if (!dev->alpdev || !dev->alp_feed)
+	if (!dev->alp || !dev->alp_feed)
 		return;
 
-	dev->alp_stats.raw_bytes_in += len;
+	dev->alp_ts_stats.raw_bytes_in += len;
 
 	for (pos = 0; pos + 188 <= len; pos += 188) {
 		if (buf[pos] == 0x47)
 			cxd2878_alp_process_ts(dev, buf + pos);
 		else
-			dev->alp_stats.ts_sync_miss++;
+			dev->alp_ts_stats.ts_sync_miss++;
 	}
 }
 EXPORT_SYMBOL_GPL(cxd2878_alp_feed_raw);
 
-/* ── DVB demux TS feed callback (fallback when no direct feed) ─────── */
+/* ── DVB demux TS feed callback ────────────────────────────────────── */
 
 static int cxd2878_alp_ts_cb(const u8 *buf1, size_t len1,
 			     const u8 *buf2, size_t len2,
@@ -553,12 +213,130 @@ static int cxd2878_alp_ts_cb(const u8 *buf1, size_t len1,
 	return 0;
 }
 
-/* ── Net device operations ─────────────────────────────────────────── */
+/* ── Sysfs TS-level statistics (on DVB frontend device) ────────────── */
 
-static int cxd2878_alp_open(struct net_device *netdev)
+#define TS_STAT_ATTR(_name) \
+static ssize_t alp_ts_##_name##_show(struct device *d, \
+				     struct device_attribute *attr, \
+				     char *buf) \
+{ \
+	struct cxd2878_dev *dev = dev_get_drvdata(d); \
+	if (!dev) return -ENODEV; \
+	return sysfs_emit(buf, "%llu\n", dev->alp_ts_stats._name); \
+} \
+static DEVICE_ATTR_RO(alp_ts_##_name)
+
+TS_STAT_ATTR(ts_reassembled);
+TS_STAT_ATTR(ts_tei);
+TS_STAT_ATTR(ts_sync_miss);
+TS_STAT_ATTR(ts_null_skip);
+TS_STAT_ATTR(ts_overflow);
+TS_STAT_ATTR(frame_err_pusi);
+TS_STAT_ATTR(raw_bytes_in);
+
+static struct attribute *alp_ts_stat_attrs[] = {
+	&dev_attr_alp_ts_ts_reassembled.attr,
+	&dev_attr_alp_ts_ts_tei.attr,
+	&dev_attr_alp_ts_ts_sync_miss.attr,
+	&dev_attr_alp_ts_ts_null_skip.attr,
+	&dev_attr_alp_ts_ts_overflow.attr,
+	&dev_attr_alp_ts_frame_err_pusi.attr,
+	&dev_attr_alp_ts_raw_bytes_in.attr,
+	NULL,
+};
+
+const struct attribute_group cxd2878_alp_ts_stat_group = {
+	.name = "alp_ts_stats",
+	.attrs = alp_ts_stat_attrs,
+};
+
+void cxd2878_alp_register_sysfs(struct cxd2878_dev *dev, struct device *parent)
 {
-	struct cxd2878_alp_priv *priv = netdev_priv(netdev);
-	struct cxd2878_dev *dev = priv->dev;
+	dev_set_drvdata(parent, dev);
+	sysfs_create_group(&parent->kobj, &cxd2878_alp_ts_stat_group);
+	dev->alp_sysfs_dev = parent;
+}
+EXPORT_SYMBOL_GPL(cxd2878_alp_register_sysfs);
+
+void cxd2878_alp_unregister_sysfs(struct cxd2878_dev *dev)
+{
+	if (dev->alp_sysfs_dev) {
+		sysfs_remove_group(&dev->alp_sysfs_dev->kobj,
+				   &cxd2878_alp_ts_stat_group);
+		dev->alp_sysfs_dev = NULL;
+	}
+}
+EXPORT_SYMBOL_GPL(cxd2878_alp_unregister_sysfs);
+
+/* ── Transport ops (called by alp.ko on net device open/stop) ──────── */
+
+static int cxd2878_alp_start_feed(struct cxd2878_dev *dev);
+static void cxd2878_alp_stop_feed(struct cxd2878_dev *dev);
+
+static int cxd2878_alp_op_open(void *priv)
+{
+	return cxd2878_alp_start_feed(priv);
+}
+
+static void cxd2878_alp_op_stop(void *priv)
+{
+	cxd2878_alp_stop_feed(priv);
+}
+
+static const struct alp_ops cxd2878_alp_ops = {
+	.open = cxd2878_alp_op_open,
+	.stop = cxd2878_alp_op_stop,
+};
+
+/* ── Attach / detach ───────────────────────────────────────────────── */
+
+int cxd2878_alp_attach(struct cxd2878_dev *dev, struct dmx_demux *demux,
+		       struct dvb_demux *dvb_demux, struct device *parent)
+{
+	struct alp_dev *alp;
+
+	dev->alp_demux = demux;
+	dev->alp_dvb_demux = dvb_demux;
+	dev->alp_feed = NULL;
+	dev->alp_carrier = false;
+	alp_ctx_reset(dev);
+	memset(&dev->alp_ts_stats, 0, sizeof(dev->alp_ts_stats));
+
+	alp = alp_attach(parent, &cxd2878_alp_ops, dev);
+	if (IS_ERR(alp)) {
+		dev->alp_demux = NULL;
+		dev->alp_dvb_demux = NULL;
+		return PTR_ERR(alp);
+	}
+
+	dev->alp = alp;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cxd2878_alp_attach);
+
+void cxd2878_alp_detach(struct cxd2878_dev *dev)
+{
+	if (!dev->alp)
+		return;
+
+	if (dev->alp_feed) {
+		dev->alp_feed->stop_filtering(dev->alp_feed);
+		dev->alp_demux->release_ts_feed(dev->alp_demux,
+						dev->alp_feed);
+		dev->alp_feed = NULL;
+	}
+
+	alp_detach(dev->alp);
+	dev->alp = NULL;
+	dev->alp_demux = NULL;
+	dev->alp_dvb_demux = NULL;
+}
+EXPORT_SYMBOL_GPL(cxd2878_alp_detach);
+
+/* ── DVB feed start/stop (called from net device open/stop) ────────── */
+
+static int cxd2878_alp_start_feed(struct cxd2878_dev *dev)
+{
 	struct dmx_ts_feed *feed;
 	int ret;
 
@@ -587,17 +365,12 @@ static int cxd2878_alp_open(struct net_device *netdev)
 
 	dev->alp_feed = feed;
 	alp_ctx_reset(dev);
-	alp_seg_reset(dev);
-	memset(&dev->alp_stats, 0, sizeof(dev->alp_stats));
-
+	memset(&dev->alp_ts_stats, 0, sizeof(dev->alp_ts_stats));
 	return 0;
 }
 
-static int cxd2878_alp_stop(struct net_device *netdev)
+static void cxd2878_alp_stop_feed(struct cxd2878_dev *dev)
 {
-	struct cxd2878_alp_priv *priv = netdev_priv(netdev);
-	struct cxd2878_dev *dev = priv->dev;
-
 	if (dev->alp_feed) {
 		dev->alp_feed->stop_filtering(dev->alp_feed);
 		dev->alp_demux->release_ts_feed(dev->alp_demux,
@@ -606,172 +379,4 @@ static int cxd2878_alp_stop(struct net_device *netdev)
 	}
 
 	alp_ctx_reset(dev);
-	alp_seg_reset(dev);
-	return 0;
 }
-
-static netdev_tx_t cxd2878_alp_xmit(struct sk_buff *skb,
-				     struct net_device *netdev)
-{
-	netdev->stats.tx_dropped++;
-	kfree_skb(skb);
-	return NETDEV_TX_OK;
-}
-
-/* ── Ethtool operations ───────────────────────────────────────────── */
-
-static void cxd2878_alp_get_drvinfo(struct net_device *netdev,
-				    struct ethtool_drvinfo *info)
-{
-	strscpy(info->driver, "cxd2878_alp", sizeof(info->driver));
-	strscpy(info->version, "1.0", sizeof(info->version));
-}
-
-static int cxd2878_alp_get_sset_count(struct net_device *netdev, int sset)
-{
-	if (sset == ETH_SS_STATS)
-		return ALP_STAT_COUNT;
-	return -EOPNOTSUPP;
-}
-
-static void cxd2878_alp_get_strings(struct net_device *netdev,
-				    u32 sset, u8 *data)
-{
-	if (sset == ETH_SS_STATS)
-		memcpy(data, alp_stat_names, sizeof(alp_stat_names));
-}
-
-static void cxd2878_alp_get_ethtool_stats(struct net_device *netdev,
-					  struct ethtool_stats *stats,
-					  u64 *data)
-{
-	struct cxd2878_alp_priv *priv = netdev_priv(netdev);
-	struct cxd2878_alp_stats *s = &priv->dev->alp_stats;
-
-	*data++ = s->ip_packets;
-	*data++ = s->ip_bytes;
-	*data++ = s->ts_packets;
-	*data++ = s->seg_completed;
-	*data++ = s->concat_delivered;
-	*data++ = s->unsupported_type;
-	*data++ = s->ext_hdr_skip;
-	*data++ = s->seg_errors;
-	*data++ = s->frame_err_single;
-	*data++ = s->frame_err_seg;
-	*data++ = s->frame_err_concat;
-	*data++ = s->frame_err_pusi;
-	*data++ = s->short_packets;
-	*data++ = s->ts_null_skip;
-	*data++ = s->ts_sync_miss;
-	*data++ = s->ts_tei;
-	*data++ = s->ts_reassembled;
-	*data++ = s->raw_bytes_in;
-	*data++ = s->skb_alloc_fail;
-	*data++ = s->netif_rx_fail;
-}
-
-static const struct ethtool_ops cxd2878_alp_ethtool_ops = {
-	.get_drvinfo		= cxd2878_alp_get_drvinfo,
-	.get_sset_count		= cxd2878_alp_get_sset_count,
-	.get_strings		= cxd2878_alp_get_strings,
-	.get_ethtool_stats	= cxd2878_alp_get_ethtool_stats,
-};
-
-/* ── Net device setup ──────────────────────────────────────────────── */
-
-static const struct net_device_ops cxd2878_alp_netdev_ops = {
-	.ndo_open	= cxd2878_alp_open,
-	.ndo_stop	= cxd2878_alp_stop,
-	.ndo_start_xmit	= cxd2878_alp_xmit,
-};
-
-static void cxd2878_alp_setup(struct net_device *netdev)
-{
-	netdev->type		= ARPHRD_NONE;
-	netdev->hard_header_len	= 0;
-	netdev->addr_len	= 0;
-	netdev->mtu		= 1500;
-	netdev->min_mtu		= 68;
-	netdev->max_mtu		= 9000;
-	netdev->flags		= IFF_POINTOPOINT | IFF_NOARP | IFF_MULTICAST;
-	netdev->netdev_ops	= &cxd2878_alp_netdev_ops;
-	netdev->ethtool_ops	= &cxd2878_alp_ethtool_ops;
-	netdev->needs_free_netdev = true;
-}
-
-/* ── Attach / detach ───────────────────────────────────────────────── */
-
-int cxd2878_alp_attach(struct cxd2878_dev *dev, struct dmx_demux *demux,
-		       struct dvb_demux *dvb_demux, struct device *parent)
-{
-	struct net_device *netdev;
-	struct cxd2878_alp_priv *priv;
-	int ret;
-
-	netdev = alloc_netdev(sizeof(*priv), "alp%d",
-			      NET_NAME_ENUM, cxd2878_alp_setup);
-	if (!netdev)
-		return -ENOMEM;
-
-	SET_NETDEV_DEV(netdev, parent);
-	netif_carrier_off(netdev);
-
-	priv = netdev_priv(netdev);
-	priv->dev = dev;
-
-	dev->alpdev = netdev;
-	dev->alp_demux = demux;
-	dev->alp_dvb_demux = dvb_demux;
-	dev->alp_feed = NULL;
-	dev->alp_carrier = false;
-	alp_ctx_reset(dev);
-	memset(&dev->alp_stats, 0, sizeof(dev->alp_stats));
-
-	dev->alp_seg_buf = kmalloc(CXD2878_ALP_SEG_BUF_SIZE, GFP_KERNEL);
-	if (!dev->alp_seg_buf) {
-		free_netdev(netdev);
-		dev->alpdev = NULL;
-		dev->alp_demux = NULL;
-		dev->alp_dvb_demux = NULL;
-		return -ENOMEM;
-	}
-	alp_seg_reset(dev);
-
-	ret = register_netdev(netdev);
-	if (ret) {
-		kfree(dev->alp_seg_buf);
-		dev->alp_seg_buf = NULL;
-		free_netdev(netdev);
-		dev->alpdev = NULL;
-		dev->alp_demux = NULL;
-		dev->alp_dvb_demux = NULL;
-		return ret;
-	}
-
-	dev_info(parent, "cxd2878: ALP net device %s registered\n",
-		 netdev->name);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(cxd2878_alp_attach);
-
-void cxd2878_alp_detach(struct cxd2878_dev *dev)
-{
-	if (!dev->alpdev)
-		return;
-
-	if (dev->alp_feed) {
-		dev->alp_feed->stop_filtering(dev->alp_feed);
-		dev->alp_demux->release_ts_feed(dev->alp_demux,
-						dev->alp_feed);
-		dev->alp_feed = NULL;
-	}
-
-	unregister_netdev(dev->alpdev);
-	/* netdev freed by needs_free_netdev */
-	kfree(dev->alp_seg_buf);
-	dev->alp_seg_buf = NULL;
-	dev->alpdev = NULL;
-	dev->alp_demux = NULL;
-	dev->alp_dvb_demux = NULL;
-}
-EXPORT_SYMBOL_GPL(cxd2878_alp_detach);

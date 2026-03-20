@@ -1172,7 +1172,7 @@ static void it930x_ts_route(struct it930x_dev *dev, u8 *buf, u32 len)
 		if (dev->fes[0].fe) {
 			struct cxd2878_dev *cxd = dev->fes[0].fe->demodulator_priv;
 
-			if (cxd && cxd->alp_feed) {
+			if (cxd && cxd->alp && cxd->alp_feed) {
 				cxd2878_alp_feed_raw(cxd, buf, len);
 				return;
 			}
@@ -2208,13 +2208,19 @@ static int it930x_dvb_init(struct it930x_dev *dev)
 
 		/* ALP virtual network adapter for ATSC 3.0 */
 		if (ife->fe) {
-			ret = cxd2878_alp_attach(ife->fe->demodulator_priv,
+			struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
+
+			ret = cxd2878_alp_attach(cxd,
 						 &ife->demux.dmx, &ife->demux,
 						 &dev->intf->dev);
-			if (ret)
+			if (ret) {
 				dev_warn(&dev->intf->dev,
 					 "ALP net attach failed for fe %d: %d\n",
 					 i, ret);
+			} else {
+				cxd2878_alp_register_sysfs(cxd,
+							   &dev->intf->dev);
+			}
 		}
 
 		continue;
@@ -2248,8 +2254,11 @@ err_unwind:
 	while (--i >= 0) {
 		struct it930x_fe_ctx *ife = &dev->fes[i];
 
-		if (ife->fe)
-			cxd2878_alp_detach(ife->fe->demodulator_priv);
+		if (ife->fe) {
+			struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
+			cxd2878_alp_unregister_sysfs(cxd);
+			cxd2878_alp_detach(cxd);
+		}
 		dvb_net_release(&ife->dvbnet);
 		dvb_dmxdev_release(&ife->dmxdev);
 		dvb_dmx_release(&ife->demux);
@@ -2276,8 +2285,11 @@ static void it930x_dvb_exit(struct it930x_dev *dev)
 	for (i = dev->board->num_frontends - 1; i >= 0; i--) {
 		struct it930x_fe_ctx *ife = &dev->fes[i];
 
-		if (ife->fe)
-			cxd2878_alp_detach(ife->fe->demodulator_priv);
+		if (ife->fe) {
+			struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
+			cxd2878_alp_unregister_sysfs(cxd);
+			cxd2878_alp_detach(cxd);
+		}
 
 		dvb_net_release(&ife->dvbnet);
 		dvb_dmxdev_release(&ife->dmxdev);
