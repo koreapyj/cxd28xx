@@ -2284,9 +2284,13 @@ static int it930x_alp_open(void *priv)
 
 	ife->alp_feed = feed;
 
-	/* Reset TS stats on open */
+	/* Reset TS decap state and stats */
 	if (ife->fe) {
 		struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
+
+		cxd->alp_buf_len = 0;
+		cxd->alp_expected_len = 0;
+		cxd->alp_active = false;
 		memset(&cxd->alp_ts_stats, 0, sizeof(cxd->alp_ts_stats));
 	}
 
@@ -2302,6 +2306,14 @@ static void it930x_alp_stop(void *priv)
 		ife->demux.dmx.release_ts_feed(&ife->demux.dmx,
 					       ife->alp_feed);
 		ife->alp_feed = NULL;
+	}
+
+	if (ife->fe) {
+		struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
+
+		cxd->alp_buf_len = 0;
+		cxd->alp_expected_len = 0;
+		cxd->alp_active = false;
 	}
 }
 
