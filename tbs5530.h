@@ -12,6 +12,8 @@
 
 #include "compat.h"
 
+struct alp_dev;
+
 #define NUM_URBS	8
 #define URB_BUF_SIZE	65536
 
@@ -33,6 +35,11 @@ struct tbs5530_dev {
 	struct dvb_demux demux;
 	struct dvb_net dvb_net;
 	struct i2c_client *i2c_client_sat;
+
+	/* ALP */
+	struct alp_dev *alp;
+	struct dmx_ts_feed *alp_feed;
+	struct kobject *alp_ts_kobj;
 
 	/* Streaming */
 	int active_fe;

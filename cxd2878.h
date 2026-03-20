@@ -121,6 +121,13 @@ struct cxd2878_config{
 	struct dvb_frontend **fe_sat;
 };
 
+struct cxd2878_dev;
+struct alp_dev;
+
+/* ALP-div-TS decapsulation: feed raw USB buffer through CXD2878 TS parser */
+void cxd2878_alp_feed_raw(struct cxd2878_dev *dev, struct alp_dev *alp,
+			  const u8 *buf, u32 len);
+
 #if IS_REACHABLE(CONFIG_DVB_CXD2878)
 extern struct dvb_frontend *cxd2878_attach(
 	const struct cxd2878_config *config,

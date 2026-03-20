@@ -11,7 +11,8 @@
 
 #include "tbs5530.h"
 #include "cxd2878.h"
-#include "cxd2878_alp.h"
+#include "cxd2878_priv.h"
+#include "alp.h"
 #include "m88rs6060.h"
 
 #define tbs5530_READ_MSG 0
@@ -250,6 +251,129 @@ static struct cxd2878_config tbs5530_cfg = {
 		.read_properties = NULL,
 	};
 
+/* -------- ALP TS-level sysfs stats -------- */
+
+struct tbs5530_alp_ts_sysfs {
+	struct kobject kobj;
+	struct cxd2878_dev *cxd;
+};
+
+#define to_tbs_alp_ts(obj) container_of(obj, struct tbs5530_alp_ts_sysfs, kobj)
+
+struct tbs5530_alp_ts_attr {
+	struct attribute attr;
+	ssize_t (*show)(struct cxd2878_dev *dev, char *buf);
+};
+
+#define TBS_ALP_TS_ATTR(_name) \
+static ssize_t tbs_alp_ts_##_name##_show(struct cxd2878_dev *dev, char *buf) \
+{ \
+	return sysfs_emit(buf, "%llu\n", dev->alp_ts_stats._name); \
+} \
+static struct tbs5530_alp_ts_attr tbs_alp_ts_attr_##_name = \
+	{ .attr = { .name = #_name, .mode = 0444 }, \
+	  .show = tbs_alp_ts_##_name##_show }
+
+TBS_ALP_TS_ATTR(ts_reassembled);
+TBS_ALP_TS_ATTR(ts_tei);
+TBS_ALP_TS_ATTR(ts_sync_miss);
+TBS_ALP_TS_ATTR(ts_null_skip);
+TBS_ALP_TS_ATTR(ts_overflow);
+TBS_ALP_TS_ATTR(frame_err_pusi);
+TBS_ALP_TS_ATTR(raw_bytes_in);
+
+static struct attribute *tbs_alp_ts_attrs[] = {
+	&tbs_alp_ts_attr_ts_reassembled.attr,
+	&tbs_alp_ts_attr_ts_tei.attr,
+	&tbs_alp_ts_attr_ts_sync_miss.attr,
+	&tbs_alp_ts_attr_ts_null_skip.attr,
+	&tbs_alp_ts_attr_ts_overflow.attr,
+	&tbs_alp_ts_attr_frame_err_pusi.attr,
+	&tbs_alp_ts_attr_raw_bytes_in.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(tbs_alp_ts);
+
+static ssize_t tbs_alp_ts_sysfs_show(struct kobject *kobj,
+				     struct attribute *attr, char *buf)
+{
+	struct tbs5530_alp_ts_sysfs *s = to_tbs_alp_ts(kobj);
+	struct tbs5530_alp_ts_attr *a =
+		container_of(attr, struct tbs5530_alp_ts_attr, attr);
+
+	return a->show(s->cxd, buf);
+}
+
+static const struct sysfs_ops tbs_alp_ts_sysfs_ops = {
+	.show = tbs_alp_ts_sysfs_show,
+};
+
+static void tbs_alp_ts_sysfs_release(struct kobject *kobj)
+{
+	kfree(to_tbs_alp_ts(kobj));
+}
+
+static const struct kobj_type tbs_alp_ts_ktype = {
+	.sysfs_ops	= &tbs_alp_ts_sysfs_ops,
+	.release	= tbs_alp_ts_sysfs_release,
+	.default_groups	= tbs_alp_ts_groups,
+};
+
+/* -------- ALP net device integration -------- */
+
+static int tbs5530_alp_open(void *priv)
+{
+	struct tbs5530_dev *dev = priv;
+	struct dmx_ts_feed *feed;
+	int ret;
+
+	ret = dev->demux.dmx.allocate_ts_feed(&dev->demux.dmx, &feed,
+					       NULL);
+	if (ret)
+		return ret;
+
+	feed->priv = dev;
+
+	ret = feed->set(feed, 0x2000, TS_PACKET, DMX_PES_OTHER,
+			ktime_set(0, 0));
+	if (ret) {
+		dev->demux.dmx.release_ts_feed(&dev->demux.dmx, feed);
+		return ret;
+	}
+
+	ret = feed->start_filtering(feed);
+	if (ret) {
+		dev->demux.dmx.release_ts_feed(&dev->demux.dmx, feed);
+		return ret;
+	}
+
+	dev->alp_feed = feed;
+
+	if (dev->fe_ter) {
+		struct cxd2878_dev *cxd = dev->fe_ter->demodulator_priv;
+		memset(&cxd->alp_ts_stats, 0, sizeof(cxd->alp_ts_stats));
+	}
+
+	return 0;
+}
+
+static void tbs5530_alp_stop(void *priv)
+{
+	struct tbs5530_dev *dev = priv;
+
+	if (dev->alp_feed) {
+		dev->alp_feed->stop_filtering(dev->alp_feed);
+		dev->demux.dmx.release_ts_feed(&dev->demux.dmx,
+					       dev->alp_feed);
+		dev->alp_feed = NULL;
+	}
+}
+
+static const struct alp_ops tbs5530_alp_ops = {
+	.open = tbs5530_alp_open,
+	.stop = tbs5530_alp_stop,
+};
+
 /* DVB stack setup */
 
 static int tbs5530_dvb_init(struct tbs5530_dev *dev)
@@ -371,15 +495,28 @@ static int tbs5530_dvb_init(struct tbs5530_dev *dev)
 	if (dev->fe_ter) {
 		struct cxd2878_dev *cxd = dev->fe_ter->demodulator_priv;
 
-		ret = cxd2878_alp_attach(cxd,
-					 &dev->demux.dmx, &dev->demux,
-					 &dev->udev->dev);
-		if (ret) {
+		dev->alp = alp_attach(&dev->udev->dev,
+				      &tbs5530_alp_ops, dev);
+		if (IS_ERR(dev->alp)) {
 			dev_warn(&dev->udev->dev,
-				 "ALP net attach failed: %d\n", ret);
+				 "ALP net attach failed: %ld\n",
+				 PTR_ERR(dev->alp));
+			dev->alp = NULL;
 		} else {
-			cxd2878_alp_register_sysfs(cxd,
-						   &dev->udev->dev);
+			struct tbs5530_alp_ts_sysfs *s;
+
+			cxd->alpdev = alp_get_netdev(dev->alp);
+			s = kzalloc(sizeof(*s), GFP_KERNEL);
+			if (s) {
+				s->cxd = cxd;
+				if (kobject_init_and_add(&s->kobj,
+							&tbs_alp_ts_ktype,
+							&dev->udev->dev.kobj,
+							"alp_ts_stats"))
+					kobject_put(&s->kobj);
+				else
+					dev->alp_ts_kobj = &s->kobj;
+			}
 		}
 	}
 
@@ -407,10 +544,14 @@ err_adapter:
 
 static void tbs5530_dvb_exit(struct tbs5530_dev *dev)
 {
-	if (dev->fe_ter) {
-		struct cxd2878_dev *cxd = dev->fe_ter->demodulator_priv;
-		cxd2878_alp_unregister_sysfs(cxd);
-		cxd2878_alp_detach(cxd);
+	if (dev->alp) {
+		if (dev->alp_ts_kobj) {
+			kobject_put(dev->alp_ts_kobj);
+			dev->alp_ts_kobj = NULL;
+		}
+		tbs5530_alp_stop(dev);
+		alp_detach(dev->alp);
+		dev->alp = NULL;
 	}
 
 	dvb_net_release(&dev->dvb_net);

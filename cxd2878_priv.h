@@ -6,7 +6,16 @@
 #include <media/dvb_demux.h>
 #include <media/dvb_frontend.h>
 
-#include "cxd2878_alp.h"
+/* ALP-div-TS level statistics */
+struct cxd2878_alp_ts_stats {
+	u64 ts_reassembled;
+	u64 ts_tei;
+	u64 ts_sync_miss;
+	u64 ts_null_skip;
+	u64 ts_overflow;
+	u64 frame_err_pusi;
+	u64 raw_bytes_in;
+};
 
 #define AUTO         (0xFF) /* For IF_OUT_SEL and AGC_SEL, it means that the value is desided by config flags. */
 								/* For RF_GAIN, it means that RF_GAIN_SEL(SubAddr:0x4E) = 1 */
@@ -352,22 +361,14 @@ struct cxd2878_dev {
 	u32 tune_time;
 	enum sony_demod_output_atsc3_t atsc3Output;
 
-	/* ALP virtual network adapter */
-	struct alp_dev      *alp;             /* generic ALP context (opaque) */
-	bool                alp_carrier;      /* carrier state tracking */
-
-	/* ALP-div-TS decap (device-specific) */
-	struct dmx_demux    *alp_demux;
-	struct dvb_demux    *alp_dvb_demux;
-	struct dmx_ts_feed  *alp_feed;
-	u8                  alp_buf[CXD2878_ALP_BUF_SIZE];
+	/* ALP-div-TS decap state */
+	struct net_device   *alpdev;          /* set by bridge for carrier control */
+	bool                alp_carrier;
+	u8                  alp_buf[16384];
 	u32                 alp_buf_len;
 	u32                 alp_expected_len;
 	bool                alp_active;
-
-	/* TS-level statistics */
 	struct cxd2878_alp_ts_stats alp_ts_stats;
-	struct device       *alp_sysfs_dev;   /* device for sysfs TS stats */
 };
 
 #endif

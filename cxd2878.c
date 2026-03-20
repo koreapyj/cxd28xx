@@ -18,7 +18,6 @@
 #include "cxd2878.h"
 #include "cxd2878_priv.h"
 #include "alp.h"
-#include "cxd2878_alp.h"
 #include "compat.h"
 
 static LIST_HEAD(cxdlist);
@@ -5098,14 +5097,13 @@ static int cxd2878_read_status(struct dvb_frontend *fe,
   	    	cxd2878_lock_flag(dev,0);//unlocked
 	  }
 
-	if (dev->alp) {
-		struct net_device *alpdev = alp_get_netdev(dev->alp);
+	if (dev->alpdev) {
 		bool locked = !!(*status & FE_HAS_LOCK);
-		if (alpdev && locked != dev->alp_carrier) {
+		if (locked != dev->alp_carrier) {
 			if (locked)
-				netif_carrier_on(alpdev);
+				netif_carrier_on(dev->alpdev);
 			else
-				netif_carrier_off(alpdev);
+				netif_carrier_off(dev->alpdev);
 			dev->alp_carrier = locked;
 		}
 	}
@@ -5680,10 +5678,8 @@ static int cxd2878_sleep_fe(struct dvb_frontend *fe)
 
 	dev->warm = 0;
 
-	if (dev->alp && dev->alp_carrier) {
-		struct net_device *alpdev = alp_get_netdev(dev->alp);
-		if (alpdev)
-			netif_carrier_off(alpdev);
+	if (dev->alpdev && dev->alp_carrier) {
+		netif_carrier_off(dev->alpdev);
 		dev->alp_carrier = false;
 	}
 
@@ -5872,6 +5868,158 @@ err:
 }
 
 EXPORT_SYMBOL_GPL(cxd2878_attach);
+
+/* ── ALP-div-TS decapsulation ──────────────────────────────────────── */
+
+#define CXD2878_ALP_TS_HDR_SIZE	3
+#define CXD2878_ALP_TS_PAYLOAD	(188 - CXD2878_ALP_TS_HDR_SIZE)
+#define CXD2878_ALP_BUF_SIZE	16384
+
+static void alp_ctx_reset(struct cxd2878_dev *dev)
+{
+	dev->alp_buf_len = 0;
+	dev->alp_expected_len = 0;
+	dev->alp_active = false;
+}
+
+static int alp_ctx_append(struct cxd2878_dev *dev, const u8 *data, u32 len)
+{
+	if (dev->alp_buf_len + len > CXD2878_ALP_BUF_SIZE) {
+		dev->alp_ts_stats.ts_overflow++;
+		alp_ctx_reset(dev);
+		return -1;
+	}
+	memcpy(dev->alp_buf + dev->alp_buf_len, data, len);
+	dev->alp_buf_len += len;
+	return 0;
+}
+
+static void alp_check_complete(struct cxd2878_dev *dev, struct alp_dev *alp)
+{
+	while (dev->alp_active) {
+		if (dev->alp_expected_len == 0 && dev->alp_buf_len >= 2) {
+			u8 b0 = dev->alp_buf[0];
+			u8 pc = (b0 >> 4) & 1;
+			u16 length = ((b0 & 0x07) << 8) | dev->alp_buf[1];
+
+			if (pc && (b0 & 0x08)) {
+				if (dev->alp_buf_len < 3)
+					break;
+				u8 msb = (dev->alp_buf[2] >> 4) & 0x0F;
+				dev->alp_expected_len =
+					((msb << 11) | length) + 2;
+			} else if (!pc && (b0 & 0x08)) {
+				if (dev->alp_buf_len < 3)
+					break;
+				u8 addl = dev->alp_buf[2];
+				u8 msb = (addl >> 3) & 0x1F;
+				u8 sif = (addl >> 1) & 1;
+				u8 hef = addl & 1;
+				u32 full_length = ((u32)msb << 11) | length;
+				u32 hdr = 3 + (sif ? 1 : 0);
+				if (hef) {
+					if (dev->alp_buf_len < hdr + 2)
+						break;
+					u8 ext_len_m1 = dev->alp_buf[hdr + 1];
+					hdr += 2 + ext_len_m1 + 1;
+				}
+				dev->alp_expected_len = hdr + full_length;
+			} else {
+				dev->alp_expected_len = length + 2;
+			}
+		}
+
+		if (dev->alp_expected_len == 0 ||
+		    dev->alp_buf_len < dev->alp_expected_len)
+			break;
+
+		alp_process(alp, dev->alp_buf, dev->alp_expected_len);
+
+		u32 leftover = dev->alp_buf_len - dev->alp_expected_len;
+		if (leftover > 0) {
+			memmove(dev->alp_buf,
+				dev->alp_buf + dev->alp_expected_len, leftover);
+			dev->alp_buf_len = leftover;
+			dev->alp_expected_len = 0;
+		} else {
+			alp_ctx_reset(dev);
+		}
+	}
+}
+
+static void cxd2878_alp_process_ts(struct cxd2878_dev *dev,
+				   struct alp_dev *alp, const u8 *pkt)
+{
+	u8 pusi;
+	u8 pointer;
+	const u8 *payload;
+	u16 pid;
+	u32 remaining;
+
+	if (pkt[0] != 0x47)
+		return;
+
+	if (pkt[1] & 0x80)
+		dev->alp_ts_stats.ts_tei++;
+
+	pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
+	if (pid == 0x1FFF) {
+		dev->alp_ts_stats.ts_null_skip++;
+		return;
+	}
+
+	dev->alp_ts_stats.ts_reassembled++;
+
+	pusi = (pkt[1] >> 6) & 1;
+	payload = pkt + CXD2878_ALP_TS_HDR_SIZE;
+
+	if (pusi) {
+		pointer = payload[0];
+		if (pointer > CXD2878_ALP_TS_PAYLOAD - 1)
+			return;
+
+		if (dev->alp_active && pointer > 0) {
+			alp_ctx_append(dev, payload + 1, pointer);
+			if (dev->alp_buf_len > 0) {
+				dev->alp_expected_len = 0;
+				alp_check_complete(dev, alp);
+				if (dev->alp_active)
+					dev->alp_ts_stats.frame_err_pusi++;
+			}
+		}
+
+		alp_ctx_reset(dev);
+
+		remaining = CXD2878_ALP_TS_PAYLOAD - 1 - pointer;
+		if (remaining > 0) {
+			dev->alp_active = true;
+			alp_ctx_append(dev, payload + 1 + pointer, remaining);
+			alp_check_complete(dev, alp);
+		}
+	} else {
+		if (dev->alp_active) {
+			alp_ctx_append(dev, payload, CXD2878_ALP_TS_PAYLOAD);
+			if (!(pkt[1] & 0x80))
+				alp_check_complete(dev, alp);
+		}
+	}
+}
+
+void cxd2878_alp_feed_raw(struct cxd2878_dev *dev, struct alp_dev *alp,
+			  const u8 *buf, u32 len)
+{
+	u32 pos;
+
+	dev->alp_ts_stats.raw_bytes_in += len;
+
+	for (pos = 0; pos + 188 <= len; pos += 188) {
+		if (buf[pos] == 0x47)
+			cxd2878_alp_process_ts(dev, alp, buf + pos);
+		else
+			dev->alp_ts_stats.ts_sync_miss++;
+	}
+}
+EXPORT_SYMBOL_GPL(cxd2878_alp_feed_raw);
 
 MODULE_AUTHOR("Yoonji Park <koreapyj@dcmys.kr>");
 MODULE_DESCRIPTION("sony cxd2878 family Demodulator+Tuner driver");

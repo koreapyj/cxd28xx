@@ -19,7 +19,7 @@
 
 #include "cxd2878.h"
 #include "cxd2878_priv.h"
-#include "cxd2878_alp.h"
+#include "alp.h"
 #include "it930x_smartcard.h"
 
 /* -------- IT930x bridge constants -------- */
@@ -175,6 +175,11 @@ struct it930x_fe_ctx {
 	u16			pid_table[IT930X_PID_FILTER_MAX];
 	bool			pid_filter_active;
 	int			wildcard_feeds;
+
+	/* ALP */
+	struct alp_dev		*alp;
+	struct dmx_ts_feed	*alp_feed;
+	struct alp_ts_sysfs	*alp_sysfs;
 };
 
 struct it930x_dev {
@@ -1169,15 +1174,15 @@ static void it930x_ts_route(struct it930x_dev *dev, u8 *buf, u32 len)
 
 	/* Fast path: single frontend, standard 0x47 sync */
 	if (dev->board->num_frontends == 1) {
-		if (dev->fes[0].fe) {
-			struct cxd2878_dev *cxd = dev->fes[0].fe->demodulator_priv;
+		struct it930x_fe_ctx *ife = &dev->fes[0];
 
-			if (cxd && cxd->alp && cxd->alp_feed) {
-				cxd2878_alp_feed_raw(cxd, buf, len);
-				return;
-			}
+		if (ife->alp && ife->alp_feed && ife->fe) {
+			struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
+
+			cxd2878_alp_feed_raw(cxd, ife->alp, buf, len);
+			return;
 		}
-		dvb_dmx_swfilter(&dev->fes[0].demux, buf, len);
+		dvb_dmx_swfilter(&ife->demux, buf, len);
 		return;
 	}
 
@@ -2130,6 +2135,181 @@ static int it930x_frontend_attach(struct it930x_fe_ctx *ife)
 	return 0;
 }
 
+/* -------- ALP TS-level sysfs stats -------- */
+
+struct alp_ts_sysfs {
+	struct kobject kobj;
+	struct cxd2878_dev *cxd;
+};
+
+#define to_alp_ts_sysfs(obj) container_of(obj, struct alp_ts_sysfs, kobj)
+
+struct alp_ts_attr {
+	struct attribute attr;
+	ssize_t (*show)(struct cxd2878_dev *dev, char *buf);
+};
+
+#define ALP_TS_ATTR(_name) \
+static ssize_t alp_ts_##_name##_show(struct cxd2878_dev *dev, char *buf) \
+{ \
+	return sysfs_emit(buf, "%llu\n", dev->alp_ts_stats._name); \
+} \
+static struct alp_ts_attr alp_ts_attr_##_name = \
+	{ .attr = { .name = #_name, .mode = 0444 }, \
+	  .show = alp_ts_##_name##_show }
+
+ALP_TS_ATTR(ts_reassembled);
+ALP_TS_ATTR(ts_tei);
+ALP_TS_ATTR(ts_sync_miss);
+ALP_TS_ATTR(ts_null_skip);
+ALP_TS_ATTR(ts_overflow);
+ALP_TS_ATTR(frame_err_pusi);
+ALP_TS_ATTR(raw_bytes_in);
+
+static struct attribute *alp_ts_attrs[] = {
+	&alp_ts_attr_ts_reassembled.attr,
+	&alp_ts_attr_ts_tei.attr,
+	&alp_ts_attr_ts_sync_miss.attr,
+	&alp_ts_attr_ts_null_skip.attr,
+	&alp_ts_attr_ts_overflow.attr,
+	&alp_ts_attr_frame_err_pusi.attr,
+	&alp_ts_attr_raw_bytes_in.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(alp_ts);
+
+static ssize_t alp_ts_sysfs_show(struct kobject *kobj,
+				 struct attribute *attr, char *buf)
+{
+	struct alp_ts_sysfs *s = to_alp_ts_sysfs(kobj);
+	struct alp_ts_attr *a = container_of(attr, struct alp_ts_attr, attr);
+
+	return a->show(s->cxd, buf);
+}
+
+static const struct sysfs_ops alp_ts_sysfs_ops = {
+	.show = alp_ts_sysfs_show,
+};
+
+static void alp_ts_sysfs_release(struct kobject *kobj)
+{
+	kfree(to_alp_ts_sysfs(kobj));
+}
+
+static const struct kobj_type alp_ts_ktype = {
+	.sysfs_ops	= &alp_ts_sysfs_ops,
+	.release	= alp_ts_sysfs_release,
+	.default_groups	= alp_ts_groups,
+};
+
+static struct alp_ts_sysfs *alp_ts_sysfs_create(struct cxd2878_dev *cxd,
+						 struct device *parent)
+{
+	struct alp_ts_sysfs *s;
+	int ret;
+
+	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	if (!s)
+		return NULL;
+
+	s->cxd = cxd;
+	ret = kobject_init_and_add(&s->kobj, &alp_ts_ktype,
+				   &parent->kobj, "alp_ts_stats");
+	if (ret) {
+		kobject_put(&s->kobj);
+		return NULL;
+	}
+
+	return s;
+}
+
+static void alp_ts_sysfs_destroy(struct alp_ts_sysfs *s)
+{
+	if (s)
+		kobject_put(&s->kobj);
+}
+
+/* -------- ALP net device integration -------- */
+
+static int it930x_alp_ts_cb(const u8 *buf1, size_t len1,
+			    const u8 *buf2, size_t len2,
+			    struct dmx_ts_feed *feed, u32 *buffer_flags)
+{
+	struct it930x_fe_ctx *ife = feed->priv;
+	struct cxd2878_dev *cxd;
+	const u8 *buf;
+	size_t len, pos;
+	int i;
+
+	if (!ife->fe || !ife->alp)
+		return 0;
+	cxd = ife->fe->demodulator_priv;
+
+	for (i = 0; i < 2; i++) {
+		buf = (i == 0) ? buf1 : buf2;
+		len = (i == 0) ? len1 : len2;
+		if (!buf || !len)
+			continue;
+		for (pos = 0; pos + 188 <= len; pos += 188)
+			cxd2878_alp_feed_raw(cxd, ife->alp, buf + pos, 188);
+	}
+	return 0;
+}
+
+static int it930x_alp_open(void *priv)
+{
+	struct it930x_fe_ctx *ife = priv;
+	struct dmx_ts_feed *feed;
+	int ret;
+
+	ret = ife->demux.dmx.allocate_ts_feed(&ife->demux.dmx, &feed,
+					       it930x_alp_ts_cb);
+	if (ret)
+		return ret;
+
+	feed->priv = ife;
+
+	ret = feed->set(feed, 0x2000, TS_PACKET, DMX_PES_OTHER,
+			ktime_set(0, 0));
+	if (ret) {
+		ife->demux.dmx.release_ts_feed(&ife->demux.dmx, feed);
+		return ret;
+	}
+
+	ret = feed->start_filtering(feed);
+	if (ret) {
+		ife->demux.dmx.release_ts_feed(&ife->demux.dmx, feed);
+		return ret;
+	}
+
+	ife->alp_feed = feed;
+
+	/* Reset TS stats on open */
+	if (ife->fe) {
+		struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
+		memset(&cxd->alp_ts_stats, 0, sizeof(cxd->alp_ts_stats));
+	}
+
+	return 0;
+}
+
+static void it930x_alp_stop(void *priv)
+{
+	struct it930x_fe_ctx *ife = priv;
+
+	if (ife->alp_feed) {
+		ife->alp_feed->stop_filtering(ife->alp_feed);
+		ife->demux.dmx.release_ts_feed(&ife->demux.dmx,
+					       ife->alp_feed);
+		ife->alp_feed = NULL;
+	}
+}
+
+static const struct alp_ops it930x_alp_ops = {
+	.open = it930x_alp_open,
+	.stop = it930x_alp_stop,
+};
+
 /* -------- DVB registration -------- */
 
 static int it930x_dvb_init(struct it930x_dev *dev)
@@ -2210,16 +2390,17 @@ static int it930x_dvb_init(struct it930x_dev *dev)
 		if (ife->fe) {
 			struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
 
-			ret = cxd2878_alp_attach(cxd,
-						 &ife->demux.dmx, &ife->demux,
-						 &dev->intf->dev);
-			if (ret) {
+			ife->alp = alp_attach(&dev->intf->dev,
+					      &it930x_alp_ops, ife);
+			if (IS_ERR(ife->alp)) {
 				dev_warn(&dev->intf->dev,
-					 "ALP net attach failed for fe %d: %d\n",
-					 i, ret);
+					 "ALP net attach failed for fe %d: %ld\n",
+					 i, PTR_ERR(ife->alp));
+				ife->alp = NULL;
 			} else {
-				cxd2878_alp_register_sysfs(cxd,
-							   &dev->intf->dev);
+				cxd->alpdev = alp_get_netdev(ife->alp);
+				ife->alp_sysfs = alp_ts_sysfs_create(cxd,
+								     &dev->intf->dev);
 			}
 		}
 
@@ -2254,10 +2435,12 @@ err_unwind:
 	while (--i >= 0) {
 		struct it930x_fe_ctx *ife = &dev->fes[i];
 
-		if (ife->fe) {
-			struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
-			cxd2878_alp_unregister_sysfs(cxd);
-			cxd2878_alp_detach(cxd);
+		if (ife->alp) {
+			alp_ts_sysfs_destroy(ife->alp_sysfs);
+			ife->alp_sysfs = NULL;
+			it930x_alp_stop(ife);
+			alp_detach(ife->alp);
+			ife->alp = NULL;
 		}
 		dvb_net_release(&ife->dvbnet);
 		dvb_dmxdev_release(&ife->dmxdev);
@@ -2285,10 +2468,12 @@ static void it930x_dvb_exit(struct it930x_dev *dev)
 	for (i = dev->board->num_frontends - 1; i >= 0; i--) {
 		struct it930x_fe_ctx *ife = &dev->fes[i];
 
-		if (ife->fe) {
-			struct cxd2878_dev *cxd = ife->fe->demodulator_priv;
-			cxd2878_alp_unregister_sysfs(cxd);
-			cxd2878_alp_detach(cxd);
+		if (ife->alp) {
+			alp_ts_sysfs_destroy(ife->alp_sysfs);
+			ife->alp_sysfs = NULL;
+			it930x_alp_stop(ife);
+			alp_detach(ife->alp);
+			ife->alp = NULL;
 		}
 
 		dvb_net_release(&ife->dvbnet);
