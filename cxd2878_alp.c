@@ -499,7 +499,14 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev, const u8 *pkt)
 	} else {
 		if (dev->alp_active) {
 			alp_ctx_append(dev, payload, CXD2878_ALP_TS_PAYLOAD);
-			alp_check_complete(dev);
+			/*
+			 * Skip inline ALP parsing on TEI-flagged packets.
+			 * Corrupt data could produce wrong ALP headers,
+			 * misaligning the buffer. Let the next PUSI handle
+			 * completion via pointer-based length check.
+			 */
+			if (!(pkt[1] & 0x80))
+				alp_check_complete(dev);
 		}
 	}
 }
