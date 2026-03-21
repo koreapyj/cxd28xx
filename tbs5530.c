@@ -321,6 +321,30 @@ static const struct kobj_type tbs_alp_ts_ktype = {
 
 /* -------- ALP net device integration -------- */
 
+static int tbs5530_alp_ts_cb(const u8 *buf1, size_t len1,
+			     const u8 *buf2, size_t len2,
+			     struct dmx_ts_feed *feed, u32 *buffer_flags)
+{
+	struct tbs5530_dev *dev = feed->priv;
+	struct cxd2878_dev *cxd;
+	const u8 *buf;
+	size_t len;
+	int i;
+
+	if (!dev->fe_ter || !dev->alp)
+		return 0;
+	cxd = dev->fe_ter->demodulator_priv;
+
+	for (i = 0; i < 2; i++) {
+		buf = (i == 0) ? buf1 : buf2;
+		len = (i == 0) ? len1 : len2;
+		if (!buf || !len)
+			continue;
+		cxd2878_alp_feed_raw(cxd, dev->alp, buf, len);
+	}
+	return 0;
+}
+
 static int tbs5530_alp_open(void *priv)
 {
 	struct tbs5530_dev *dev = priv;
@@ -328,7 +352,7 @@ static int tbs5530_alp_open(void *priv)
 	int ret;
 
 	ret = dev->demux.dmx.allocate_ts_feed(&dev->demux.dmx, &feed,
-					       NULL);
+					       tbs5530_alp_ts_cb);
 	if (ret)
 		return ret;
 
