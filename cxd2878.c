@@ -5952,7 +5952,9 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev,
 				dev->alp_ts_stats.frame_err_pusi++;
 		}
 
-		alp_ctx_reset(dev);
+		/* Only reset on non-TEI PUSI; TEI pointer is unreliable */
+		if (!(pkt[1] & 0x80))
+			alp_ctx_reset(dev);
 
 		remaining = CXD2878_ALP_TS_PAYLOAD - 1 - pointer;
 		if (remaining > 0) {
@@ -5964,8 +5966,7 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev,
 		/* Continuation — just accumulate and drain */
 		if (dev->alp_active) {
 			alp_ctx_append(dev, payload, CXD2878_ALP_TS_PAYLOAD);
-			if (!(pkt[1] & 0x80))
-				alp_drain_buf(dev, alp);
+			alp_drain_buf(dev, alp);
 		}
 	}
 }
