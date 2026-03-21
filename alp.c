@@ -104,6 +104,19 @@ static void alp_deliver_ipv4(struct alp_dev *alp, const u8 *data, u32 len)
 	}
 }
 
+static void alp_deliver_lls(struct alp_dev *alp,
+			    const u8 *payload, u32 payload_len)
+{
+	if (payload_len > 5 &&
+	    (payload[0] == ALP_SIGTYPE_LMT ||
+	     payload[0] == ALP_SIGTYPE_RDT)) {
+		payload += 5;
+		payload_len -= 5;
+	}
+
+	alp->stats.type_lls++;
+}
+
 /* Dispatch a single complete ALP payload by type */
 static void alp_dispatch(struct alp_dev *alp, u8 packet_type,
 			 const u8 *payload, u32 payload_len)
@@ -116,7 +129,7 @@ static void alp_dispatch(struct alp_dev *alp, u8 packet_type,
 		alp->stats.type_compressed_ip++;
 		break;
 	case ALP_TYPE_LLS:
-		alp->stats.type_lls++;
+		alp_deliver_lls(alp, payload, payload_len);
 		break;
 	case ALP_TYPE_TYPE_EXT:
 		alp->stats.type_ext++;

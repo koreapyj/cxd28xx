@@ -23,6 +23,10 @@ struct device;
 #define ALP_TYPE_TYPE_EXT	6
 #define ALP_TYPE_MPEG2_TS	7
 
+/* Link-layer signaling types (A/330 §6) */
+#define ALP_SIGTYPE_LMT		0x01	/* Link Mapping Table */
+#define ALP_SIGTYPE_RDT		0x02	/* ROHC-U Description Table */
+
 /* Segmentation buffer size: max 32 segments × 2047 bytes */
 #define ALP_SEG_BUF_SIZE	65536
 
