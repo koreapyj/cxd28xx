@@ -5673,6 +5673,8 @@ static int cxd2878_sleep_fe(struct dvb_frontend *fe)
 	struct cxd2878_dev *dev = fe->demodulator_priv;
 
 	mutex_lock(&dev->base->i2c_lock);
+	if (dev->base->config->lock_flag)
+		cxd2878_lock_flag(dev, 0);
 	cxd2878_sleep(dev);
 	mutex_unlock(&dev->base->i2c_lock);
 

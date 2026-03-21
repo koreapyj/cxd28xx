@@ -212,6 +212,8 @@ static int tbs5530_stop_feed(struct dvb_demux_feed *feed)
 	return 0;
 }
 
+static void tbs5530_alp_stop(void *priv);
+
 /* Frontend TS routing */
 
 static int tbs5530_fe_ter_init(struct dvb_frontend *fe)
@@ -221,6 +223,17 @@ static int tbs5530_fe_ter_init(struct dvb_frontend *fe)
 	dev->active_fe = 0;
 	if (dev->fe_ter_ops_orig.init)
 		return dev->fe_ter_ops_orig.init(fe);
+	return 0;
+}
+
+static int tbs5530_fe_ter_sleep(struct dvb_frontend *fe)
+{
+	struct tbs5530_dev *dev = fe->dvb->priv;
+
+	tbs5530_alp_stop(dev);
+
+	if (dev->fe_ter_ops_orig.sleep)
+		return dev->fe_ter_ops_orig.sleep(fe);
 	return 0;
 }
 
@@ -437,6 +450,7 @@ static int tbs5530_dvb_init(struct tbs5530_dev *dev)
 
 	dev->fe_ter_ops_orig = dev->fe_ter->ops;
 	dev->fe_ter->ops.init = tbs5530_fe_ter_init;
+	dev->fe_ter->ops.sleep = tbs5530_fe_ter_sleep;
 
 	ret = dvb_register_frontend(adap, dev->fe_ter);
 	if (ret)

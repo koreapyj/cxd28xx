@@ -180,6 +180,7 @@ struct it930x_fe_ctx {
 	struct alp_dev		*alp;
 	struct dmx_ts_feed	*alp_feed;
 	struct alp_ts_sysfs	*alp_sysfs;
+	struct dvb_frontend_ops	fe_ops_orig;
 };
 
 struct it930x_dev {
@@ -2094,6 +2095,19 @@ static const struct file_operations it930x_sc_fops = {
 	.unlocked_ioctl	= it930x_sc_ioctl,
 };
 
+static void it930x_alp_stop(void *priv);
+
+static int it930x_fe_sleep(struct dvb_frontend *fe)
+{
+	struct it930x_fe_ctx *ife = fe->dvb->priv;
+
+	it930x_alp_stop(ife);
+
+	if (ife->fe_ops_orig.sleep)
+		return ife->fe_ops_orig.sleep(fe);
+	return 0;
+}
+
 /* -------- Frontend attach -------- */
 
 static int it930x_frontend_attach(struct it930x_fe_ctx *ife)
@@ -2131,6 +2145,9 @@ static int it930x_frontend_attach(struct it930x_fe_ctx *ife)
 	if (ife->fe_sat)
 		strscpy(ife->fe_sat->ops.info.name, board->name,
 			sizeof(ife->fe_sat->ops.info.name));
+
+	ife->fe_ops_orig = ife->fe->ops;
+	ife->fe->ops.sleep = it930x_fe_sleep;
 
 	return 0;
 }
