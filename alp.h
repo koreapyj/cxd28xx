@@ -95,6 +95,19 @@ void alp_detach(struct alp_dev *alp);
 void alp_process(struct alp_dev *alp, const u8 *buf, u32 len);
 
 /**
+ * alp_feed - Feed a buffer that may contain multiple ALP packets
+ * @alp: ALP device context
+ * @buf: pointer to ALP data (may contain multiple back-to-back packets)
+ * @len: total length in bytes
+ *
+ * Extracts and processes complete ALP packets from the buffer using
+ * their length fields.  Returns the number of bytes consumed; any
+ * unconsumed trailing bytes are the caller's responsibility to carry
+ * over for the next call.
+ */
+u32 alp_feed(struct alp_dev *alp, const u8 *buf, u32 len);
+
+/**
  * alp_get_netdev - Get the net_device associated with this ALP context
  * @alp: ALP device context
  *

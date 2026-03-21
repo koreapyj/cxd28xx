@@ -366,7 +366,6 @@ struct cxd2878_dev {
 	bool                alp_carrier;
 	u8                  alp_buf[16384];
 	u32                 alp_buf_len;
-	u32                 alp_expected_len;
 	bool                alp_active;
 	struct cxd2878_alp_ts_stats alp_ts_stats;
 };

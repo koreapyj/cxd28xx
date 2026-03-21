@@ -5878,7 +5878,6 @@ EXPORT_SYMBOL_GPL(cxd2878_attach);
 static void alp_ctx_reset(struct cxd2878_dev *dev)
 {
 	dev->alp_buf_len = 0;
-	dev->alp_expected_len = 0;
 	dev->alp_active = false;
 }
 
@@ -5894,56 +5893,21 @@ static int alp_ctx_append(struct cxd2878_dev *dev, const u8 *data, u32 len)
 	return 0;
 }
 
-static void alp_check_complete(struct cxd2878_dev *dev, struct alp_dev *alp)
+static void alp_drain_buf(struct cxd2878_dev *dev, struct alp_dev *alp)
 {
-	while (dev->alp_active) {
-		if (dev->alp_expected_len == 0 && dev->alp_buf_len >= 2) {
-			u8 b0 = dev->alp_buf[0];
-			u8 pc = (b0 >> 4) & 1;
-			u16 length = ((b0 & 0x07) << 8) | dev->alp_buf[1];
+	u32 consumed;
 
-			if (pc && (b0 & 0x08)) {
-				if (dev->alp_buf_len < 3)
-					break;
-				u8 msb = (dev->alp_buf[2] >> 4) & 0x0F;
-				dev->alp_expected_len =
-					((msb << 11) | length) + 2;
-			} else if (!pc && (b0 & 0x08)) {
-				if (dev->alp_buf_len < 3)
-					break;
-				u8 addl = dev->alp_buf[2];
-				u8 msb = (addl >> 3) & 0x1F;
-				u8 sif = (addl >> 1) & 1;
-				u8 hef = addl & 1;
-				u32 full_length = ((u32)msb << 11) | length;
-				u32 hdr = 3 + (sif ? 1 : 0);
-				if (hef) {
-					if (dev->alp_buf_len < hdr + 2)
-						break;
-					u8 ext_len_m1 = dev->alp_buf[hdr + 1];
-					hdr += 2 + ext_len_m1 + 1;
-				}
-				dev->alp_expected_len = hdr + full_length;
-			} else {
-				dev->alp_expected_len = length + 2;
-			}
-		}
+	if (!dev->alp_active || dev->alp_buf_len == 0)
+		return;
 
-		if (dev->alp_expected_len == 0 ||
-		    dev->alp_buf_len < dev->alp_expected_len)
-			break;
-
-		alp_process(alp, dev->alp_buf, dev->alp_expected_len);
-
-		u32 leftover = dev->alp_buf_len - dev->alp_expected_len;
-		if (leftover > 0) {
-			memmove(dev->alp_buf,
-				dev->alp_buf + dev->alp_expected_len, leftover);
-			dev->alp_buf_len = leftover;
-			dev->alp_expected_len = 0;
-		} else {
-			alp_ctx_reset(dev);
-		}
+	consumed = alp_feed(alp, dev->alp_buf, dev->alp_buf_len);
+	if (consumed > 0) {
+		dev->alp_buf_len -= consumed;
+		if (dev->alp_buf_len > 0)
+			memmove(dev->alp_buf, dev->alp_buf + consumed,
+				dev->alp_buf_len);
+		else
+			dev->alp_active = false;
 	}
 }
 
@@ -5975,17 +5939,17 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev,
 
 	if (pusi) {
 		pointer = payload[0];
-		if (pointer > CXD2878_ALP_TS_PAYLOAD - 1)
-			return;
+		if (pointer > CXD2878_ALP_TS_PAYLOAD - 1) {
+			dev->alp_ts_stats.frame_err_pusi++;
+			pointer = CXD2878_ALP_TS_PAYLOAD - 1;
+		}
 
+		/* Complete previous ALP with tail bytes and deliver */
 		if (dev->alp_active && pointer > 0) {
 			alp_ctx_append(dev, payload + 1, pointer);
-			if (dev->alp_buf_len > 0) {
-				dev->alp_expected_len = 0;
-				alp_check_complete(dev, alp);
-				if (dev->alp_active)
-					dev->alp_ts_stats.frame_err_pusi++;
-			}
+			alp_drain_buf(dev, alp);
+			if (dev->alp_active)
+				dev->alp_ts_stats.frame_err_pusi++;
 		}
 
 		alp_ctx_reset(dev);
@@ -5994,13 +5958,14 @@ static void cxd2878_alp_process_ts(struct cxd2878_dev *dev,
 		if (remaining > 0) {
 			dev->alp_active = true;
 			alp_ctx_append(dev, payload + 1 + pointer, remaining);
-			alp_check_complete(dev, alp);
+			alp_drain_buf(dev, alp);
 		}
 	} else {
+		/* Continuation — just accumulate and drain */
 		if (dev->alp_active) {
 			alp_ctx_append(dev, payload, CXD2878_ALP_TS_PAYLOAD);
 			if (!(pkt[1] & 0x80))
-				alp_check_complete(dev, alp);
+				alp_drain_buf(dev, alp);
 		}
 	}
 }

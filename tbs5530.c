@@ -353,7 +353,6 @@ static int tbs5530_alp_open(void *priv)
 		struct cxd2878_dev *cxd = dev->fe_ter->demodulator_priv;
 
 		cxd->alp_buf_len = 0;
-		cxd->alp_expected_len = 0;
 		cxd->alp_active = false;
 		memset(&cxd->alp_ts_stats, 0, sizeof(cxd->alp_ts_stats));
 	}
@@ -376,7 +375,6 @@ static void tbs5530_alp_stop(void *priv)
 		struct cxd2878_dev *cxd = dev->fe_ter->demodulator_priv;
 
 		cxd->alp_buf_len = 0;
-		cxd->alp_expected_len = 0;
 		cxd->alp_active = false;
 	}
 }

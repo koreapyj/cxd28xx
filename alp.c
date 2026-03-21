@@ -341,9 +341,28 @@ void alp_process(struct alp_dev *alp, const u8 *buf, u32 len)
 	alp_length = ((buf[0] & 0x07) << 8) | buf[1];
 
 	if (header_mode) {
+		if (len < 3) {
+			alp->stats.short_packets++;
+			return;
+		}
+
+		u8 addl = buf[2];
+		u8 sif = (addl >> 1) & 1;
+		u8 hef = addl & 1;
+
+		hdr_size = 3 + (sif ? 1 : 0);
+		if (hef) {
+			if (hdr_size + 2 > len) {
+				alp->stats.short_packets++;
+				return;
+			}
+			u8 ext_len_m1 = buf[hdr_size + 1];
+			hdr_size += 2 + ext_len_m1 + 1;
+		}
+
+		/* Only deliver types we can process */
 		switch (packet_type) {
 		case ALP_TYPE_IPV4:
-			hdr_size = 3;
 			break;
 		case ALP_TYPE_COMPRESSED_IP:
 			alp->stats.ext_hdr_compressed_ip++; return;
@@ -360,17 +379,87 @@ void alp_process(struct alp_dev *alp, const u8 *buf, u32 len)
 		hdr_size = 2;
 	}
 
-	if (alp_length + 2 > len) {
-		alp->stats.frame_err_single++;
+	if (hdr_size > len) {
+		alp->stats.short_packets++;
 		return;
 	}
 
 	payload = buf + hdr_size;
+	if (hdr_size - 2 >= alp_length) {
+		/* Header consumes entire length — no payload */
+		return;
+	}
 	payload_len = alp_length - (hdr_size - 2);
 
 	alp_dispatch(alp, packet_type, payload, payload_len);
 }
 EXPORT_SYMBOL_GPL(alp_process);
+
+/*
+ * Determine total size of the ALP packet at the start of buf.
+ * Returns 0 if insufficient data to determine the size.
+ */
+static u32 alp_peek_total_size(const u8 *buf, u32 len)
+{
+	u16 alp_length;
+
+	if (len < 2)
+		return 0;
+
+	alp_length = ((buf[0] & 0x07) << 8) | buf[1];
+
+	if ((buf[0] & 0x18) == 0x18) {
+		/* PC=1, S/C=1 (concatenated): 4 MSB in byte 2 */
+		if (len < 3)
+			return 0;
+		alp_length |= ((u16)(buf[2] >> 4) & 0x0F) << 11;
+		return 2 + alp_length;
+	}
+
+	if ((buf[0] & 0x18) == 0x08) {
+		/* PC=0, HM=1 (extended header): 5 MSB in byte 2 */
+		u8 addl, sif, hef;
+		u32 full_length, hdr;
+
+		if (len < 3)
+			return 0;
+		addl = buf[2];
+		sif = (addl >> 1) & 1;
+		hef = addl & 1;
+		full_length = (((u32)(addl >> 3) & 0x1F) << 11) | alp_length;
+		hdr = 3 + (sif ? 1 : 0);
+		if (hef) {
+			if (len < hdr + 2)
+				return 0;
+			hdr += 2 + buf[hdr + 1] + 1;
+		}
+		return hdr + full_length;
+	}
+
+	return 2 + alp_length;
+}
+
+u32 alp_feed(struct alp_dev *alp, const u8 *buf, u32 len)
+{
+	u32 pos = 0;
+
+	if (!alp)
+		return 0;
+
+	while (pos < len) {
+		u32 remaining = len - pos;
+		u32 total = alp_peek_total_size(buf + pos, remaining);
+
+		if (total == 0 || total > remaining)
+			break;
+
+		alp_process(alp, buf + pos, total);
+		pos += total;
+	}
+
+	return pos;
+}
+EXPORT_SYMBOL_GPL(alp_feed);
 
 /* ── Net device operations ─────────────────────────────────────────── */
 
