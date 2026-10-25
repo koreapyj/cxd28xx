@@ -184,6 +184,13 @@ static void alp_handle_segmented(struct alp_dev *alp, u8 packet_type,
 		return;
 	}
 
+	if (hdr_size - 2 >= alp_length) {
+		/* Header is longer than the declared length; payload_len would wrap */
+		alp->stats.frame_err_seg++;
+		alp_seg_reset(alp);
+		return;
+	}
+
 	payload = buf + hdr_size;
 	payload_len = alp_length - (hdr_size - 2);
 

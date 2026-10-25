@@ -1249,6 +1249,7 @@ static int it930x_start_streaming(struct it930x_dev *dev)
 {
 	int i, ret;
 	int flush_len = 0;
+	u8 *flush_buf;
 
 	if (dev->streaming)
 		return 0;
@@ -1270,11 +1271,20 @@ static int it930x_start_streaming(struct it930x_dev *dev)
 		return ret;
 	}
 
-	/* Flush stale data from bridge FIFO */
-	usb_bulk_msg(dev->udev,
-		     usb_rcvbulkpipe(dev->udev, IT930X_EP_TS),
-		     dev->urb_bufs[0], IT930X_URB_BUF_SIZE,
-		     &flush_len, 100);
+	/*
+	 * Flush stale data from bridge FIFO. The buffer must be kmalloc()ed:
+	 * usb_bulk_msg() DMA-maps it, and urb_bufs[] is usb_alloc_coherent()
+	 * memory, which dma_map_single() rejects on architectures where that
+	 * is a vmalloc remap.
+	 */
+	flush_buf = kmalloc(IT930X_URB_BUF_SIZE, GFP_KERNEL);
+	if (flush_buf) {
+		usb_bulk_msg(dev->udev,
+			     usb_rcvbulkpipe(dev->udev, IT930X_EP_TS),
+			     flush_buf, IT930X_URB_BUF_SIZE,
+			     &flush_len, 100);
+		kfree(flush_buf);
+	}
 
 	/* Reset stats */
 	dev->urb_complete_ok = 0;
@@ -1546,10 +1556,8 @@ static int it930x_start_feed(struct dvb_demux_feed *feed)
 		if (!ret)
 			ret = it930x_pid_filter_set_mode(dev, port, true);
 		mutex_unlock(&dev->io_lock);
-		if (ret) {
-			ife->feeding--;
-			return ret;
-		}
+		if (ret)
+			goto err_unwind;
 		ife->pid_filter_active = true;
 		memset(ife->pid_table, 0xff, sizeof(ife->pid_table));
 	}
@@ -1575,7 +1583,7 @@ static int it930x_start_feed(struct dvb_demux_feed *feed)
 				ret = it930x_pid_filter_add(dev, port, i, pid);
 				mutex_unlock(&dev->io_lock);
 				if (ret)
-					return ret;
+					goto err_unwind;
 				ife->pid_table[i] = pid;
 				break;
 			}
@@ -1583,6 +1591,23 @@ static int it930x_start_feed(struct dvb_demux_feed *feed)
 	}
 
 	return 0;
+
+err_unwind:
+	if (--ife->feeding == 0) {
+		if (ife->pid_filter_active) {
+			mutex_lock(&dev->io_lock);
+			it930x_pid_filter_set_mode(dev, port, false);
+			mutex_unlock(&dev->io_lock);
+			ife->pid_filter_active = false;
+		}
+
+		mutex_lock(&dev->stream_lock);
+		if (--dev->stream_count == 0)
+			it930x_stop_streaming(dev);
+		mutex_unlock(&dev->stream_lock);
+	}
+
+	return ret;
 }
 
 static int it930x_stop_feed(struct dvb_demux_feed *feed)
@@ -2041,7 +2066,7 @@ static long it930x_sc_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
 {
 	struct it930x_dev *dev = file->private_data;
-	struct it930x_sc_atr atr_data;
+	struct it930x_sc_atr atr_data = { };
 	int present;
 	int ret;
 

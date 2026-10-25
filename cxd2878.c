@@ -362,7 +362,7 @@ static int cxd2878_atsc_SlaveRWriteRegister (struct cxd2878_dev*dev,
 			ret = -1;
 			goto err;}
 	  }
-   	if(rdata[0]&0x3F!=0x30){
+   	if((rdata[0] & 0x3F) != 0x30){
 		ret = -1;
 		goto err;
    	}
@@ -397,7 +397,7 @@ err:
 
 static int cxd2878_atsc_softreset(struct cxd2878_dev *dev)
 {
-	int ret,waittime;
+	int ret,waittime = 0;
 	u8 data[6],rdata[6];
 	ret = cxd2878_wr(dev,dev->slvr,0x00,0x01);  //demodabort
 	ret |= cxd2878_wr(dev,dev->slvr,0x48,0x01); // atsccpustate = IDLE
@@ -435,7 +435,7 @@ static int cxd2878_atsc_softreset(struct cxd2878_dev *dev)
 			goto err;}
 	  }
 
-	 if(rdata[0]&0x3F!=0x30){
+	 if((rdata[0] & 0x3F) != 0x30){
 		ret = -1;
 		goto err;
    	 }
@@ -4312,6 +4312,13 @@ static int SLtoAA3_BandSetting(struct cxd2878_dev*dev)
 {
 	int ret = 0;
 
+	/* The tables below are indexed by bandwidth; DTV_BANDWIDTH_HZ is not
+	 * validated by dvb-core, so range-check it before using it. */
+	if (dev->bandwidth < SONY_DTV_BW_6_MHZ || dev->bandwidth > SONY_DTV_BW_8_MHZ) {
+		ret = -EINVAL;
+		goto err;
+	}
+
 	/* <Timing Recovery setting>
 	 *  slave     Bank    Addr    Bit      Default    Name
 	 * ----------------------------------------------------------------------------
@@ -4960,7 +4967,7 @@ static int cxd2878_read_status(struct dvb_frontend *fe,
 	u32 ifout,per = 0;
 	u8 tmp[2],qam = 0;
 	u16 tmp16 = 0;
-	s32  rflevel,snr=0,rflevel_dBm=0;
+	s32  rflevel=0,snr=0,rflevel_dBm=0;
 
 	mutex_lock(&dev->base->i2c_lock);
 
