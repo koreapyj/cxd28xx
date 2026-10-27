@@ -12,6 +12,7 @@
 #include <linux/firmware.h>
 #include <linux/delay.h>
 #include <linux/miscdevice.h>
+#include <linux/netdevice.h>
 #include <media/dvb_frontend.h>
 #include <media/dmxdev.h>
 #include <media/dvb_demux.h>
@@ -2196,6 +2197,7 @@ static const struct file_operations it930x_sc_fops = {
 };
 
 static void it930x_alp_stop(void *priv);
+static int it930x_alp_open(void *priv);
 
 /* Per-frontend LNB request; it930x_set_lnb() refcounts across frontends */
 static int it930x_fe_lnb(struct it930x_fe_ctx *ife, bool on)
@@ -2233,6 +2235,25 @@ static int it930x_fe_sleep(struct dvb_frontend *fe)
 
 	if (ife->fe_ops_orig.sleep)
 		return ife->fe_ops_orig.sleep(fe);
+	return 0;
+}
+
+static int it930x_fe_init(struct dvb_frontend *fe)
+{
+	struct it930x_fe_ctx *ife = fe->dvb->priv;
+	struct net_device *ndev = alp_get_netdev(ife->alp);
+	int ret = 0;
+
+	if (ife->fe_ops_orig.init)
+		ret = ife->fe_ops_orig.init(fe);
+	if (ret)
+		return ret;
+
+	/* it930x_fe_sleep() released the feed, and ndo_open() does not run
+	 * again while the interface stays up. */
+	if (ndev && netif_running(ndev) && !ife->alp_feed)
+		it930x_alp_open(ife);
+
 	return 0;
 }
 
@@ -2284,6 +2305,7 @@ static int it930x_frontend_attach(struct it930x_fe_ctx *ife)
 
 	ife->fe_ops_orig = ife->fe->ops;
 	ife->fe->ops.sleep = it930x_fe_sleep;
+	ife->fe->ops.init = it930x_fe_init;
 	if (board->gpio_lnb)
 		ife->fe->ops.set_voltage = it930x_fe_set_voltage;
 
